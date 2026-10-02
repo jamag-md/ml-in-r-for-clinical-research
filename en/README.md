@@ -201,7 +201,7 @@ educational purposes.
 
 ## 11. License
 
-* **Code** (the R code in the `.Rmd` files): [MIT License](LICENSE).
+* **Code** (the R code in the `.Rmd` files): [MIT License](../LICENSE).
 * **Text and teaching material**: [Creative Commons Attribution 4.0
   (CC BY 4.0)](https://creativecommons.org/licenses/by/4.0/).
 * **Datasets** are **not** included in this repository. The code downloads
