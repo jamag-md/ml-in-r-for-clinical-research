@@ -1,0 +1,436 @@
+---
+title: "Lección 2 — Regresión logística (clásica y al estilo machine learning)"
+author: "Tu nombre"
+date: "`r Sys.Date()`"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# El concepto
+
+## ¿Qué problema resuelve?
+
+La **regresión logística** predice la **probabilidad** de un desenlace sí/no
+(aquí: enfermedad arterial coronaria, EAC) a partir de varios predictores. Es
+el método estándar en investigación clínica y la **referencia que todo modelo
+de ML debe superar**.
+
+## Cómo funciona (sin matemáticas)
+
+1. Suma los predictores, cada uno multiplicado por un peso (un
+   *coeficiente*): `puntuación = b0 + b1*edad + b2*hombre + ...`
+2. La puntuación puede ser cualquier número, así que se comprime entre 0 y 1
+   con una curva en forma de S (la función *logística* o *sigmoide*). El
+   resultado es una probabilidad.
+3. Los pesos se eligen para que las probabilidades predichas se ajusten lo
+   mejor posible a los desenlaces observados (*máxima verosimilitud*).
+
+**Odds ratio (OR)** = `exp(coeficiente)`. Un OR de 2 para "hombre" significa
+que los hombres tienen el doble de *odds* de EAC que las mujeres,
+**manteniendo constantes las demás variables**.
+
+## Dos preguntas distintas: *explicar* frente a *predecir*
+
+| | **Explicativa (estadística clásica)** | **Predictiva (machine learning)** |
+|---|---|---|
+| Pregunta | *¿Qué factores se asocian con la EAC y con qué fuerza?* | *¿Con qué precisión podemos predecir la EAC en pacientes **nuevos**?* |
+| Resultado principal | Odds ratios, IC 95%, valores p | AUC, calibración, sensibilidad... en datos no vistos |
+| Uso de los datos | Normalmente todos los datos | División entrenamiento/prueba + validación cruzada |
+
+Los investigadores suelen confundirlas. Esta lección muestra ambas para que
+veas la diferencia.
+
+# Cargar los paquetes y los datos
+
+```{r packages}
+library(tidyverse)
+library(tidymodels)
+library(gtsummary)
+
+tidymodels_prefer()   # si dos paquetes tienen una función con el mismo nombre, usa la de tidymodels
+theme_gtsummary_language("es")   # las tablas de gtsummary, en español
+
+heart       <- readRDS("data/heart_clean.rds")   # datos limpios creados en la Lección 1
+heart_split <- readRDS("data/heart_split.rds")   # la misma división entrenamiento/prueba de la Lección 1
+heart_train <- training(heart_split)
+heart_test  <- testing(heart_split)
+
+dir.create("results", showWarnings = FALSE)       # carpeta para guardar resultados para la Lección 6
+```
+
+> Si aparece `cannot open file 'data/heart_clean.rds'` ("no se puede abrir el
+> archivo"), aún no has ejecutado la Lección 1, o no abriste el curso con el
+> archivo `.Rproj`.
+
+# Parte A: regresión logística clásica (explicativa)
+
+`glm()` significa *modelo lineal generalizado*. `family = binomial` le
+indica que haga una regresión logística.
+
+`glm()` modela la probabilidad del **segundo** nivel del factor. Nuestro
+desenlace tiene `"Yes"` primero, así que para evitar confusiones creamos una
+versión 0/1 en la que 1 = EAC.
+
+```{r glm-fit}
+heart_glm_data <- heart |>
+  mutate(disease_01 = if_else(disease == "Yes", 1, 0)) |>  # 1 = EAC, 0 = sin EAC
+  select(-disease)                                          # elimina la versión factor
+
+glm_fit <- glm(
+  disease_01 ~ .,           # fórmula: desenlace ~ predictores. El punto significa "todas las demás columnas"
+  data = heart_glm_data,
+  family = binomial         # regresión logística
+)
+
+# glm() elimina sin avisar a los 6 pacientes con algún valor faltante (un "análisis de casos completos").
+nobs(glm_fit)   # número de pacientes realmente usados
+```
+
+## Tabla de odds ratios (lista para publicar)
+
+```{r glm-table}
+tbl_regression(
+  glm_fit,
+  exponentiate = TRUE   # muestra odds ratios (exp de los coeficientes) en lugar de log-odds
+) |>
+  bold_p() |>           # pone en negrita los valores p menores de 0,05
+  bold_labels()
+```
+
+**Cómo leer una fila:** para `sex = Male`, un OR mayor que 1 con un IC 95%
+que no incluye el 1 significa que los hombres tenían mayores odds de EAC que
+las mujeres **tras ajustar por todas las demás variables del modelo**.
+
+> **Precaución:** son *asociaciones*, no causas. Además, con 297 pacientes,
+> 139 eventos y 17 coeficientes, el modelo está cerca del límite de lo que
+> los datos permiten. Una regla práctica habitual pide al menos 10–20 eventos
+> por coeficiente. Para métodos adecuados de tamaño muestral, consulta Riley
+> et al., *BMJ* 2020.
+
+# Parte B: la regresión logística como modelo *predictivo* (tidymodels)
+
+Ahora la pregunta es: **¿qué tan bien predice en pacientes nuevos?** Usamos
+el marco **tidymodels**. Reutilizarás exactamente los mismos 5 pasos para
+random forest, XGBoost y LightGBM:
+
+1. **Receta** (*recipe*): cómo preparar los predictores.
+2. **Especificación del modelo**: qué algoritmo.
+3. **Flujo de trabajo** (*workflow*): receta + modelo unidos.
+4. **Remuestreo (validación cruzada)**: estimar el rendimiento usando solo
+   los datos de entrenamiento.
+5. **Ajuste final**: entrenar con todos los datos de entrenamiento y evaluar
+   **una vez** con el conjunto de prueba.
+
+## Paso 1: la receta (preprocesamiento)
+
+Una receta enumera pasos de preparación. Lo esencial: cada paso **aprende
+solo de los datos de entrenamiento** (por ejemplo, la mediana usada para
+rellenar valores faltantes) y después *aplica* lo mismo a datos nuevos.
+Preprocesar todo el conjunto antes de dividirlo filtra información del
+conjunto de prueba hacia el entrenamiento. Eso se llama **fuga de datos**
+(*data leakage*) y hace que los resultados parezcan demasiado buenos.
+
+```{r recipe}
+heart_recipe <- recipe(disease ~ ., data = heart_train) |>   # desenlace ~ todos los predictores
+  step_impute_median(all_numeric_predictors()) |>  # rellena números faltantes con la mediana de entrenamiento
+  step_impute_mode(all_nominal_predictors()) |>    # rellena categorías faltantes con la más frecuente
+  step_dummy(all_nominal_predictors()) |>          # convierte categorías en columnas 0/1 ("variables dummy")
+  step_zv(all_predictors()) |>                     # elimina columnas sin varianza (todas con el mismo valor)
+  step_normalize(all_numeric_predictors())         # reescala los números a media 0 y DE 1 (necesario para LASSO)
+
+heart_recipe
+```
+
+¿Quieres ver qué produce la receta? `prep()` aprende los pasos con los datos
+de entrenamiento y `bake()` los aplica:
+
+```{r recipe-peek}
+heart_recipe |>
+  prep() |>                 # aprende medianas, modas, medias y DE con los datos de entrenamiento
+  bake(new_data = NULL) |>  # los aplica a los propios datos de entrenamiento (NULL = los datos de los que aprendió)
+  head()                    # primeras 6 filas: fíjate en las nuevas columnas dummy, como sex_Male
+```
+
+## Paso 2: la especificación del modelo
+
+```{r model-spec}
+logistic_spec <- logistic_reg() |>   # el tipo de modelo
+  set_engine("glm") |>               # qué función de R hace el cálculo (glm)
+  set_mode("classification")         # predecimos una categoría, no un número
+
+logistic_spec
+```
+
+## Paso 3: el flujo de trabajo
+
+```{r workflow}
+logistic_wf <- workflow() |>
+  add_recipe(heart_recipe) |>    # el preprocesamiento
+  add_model(logistic_spec)       # el modelo
+
+logistic_wf
+```
+
+## Paso 4: validación cruzada (VC)
+
+### Concepto
+
+Usar el conjunto de prueba para comparar o ajustar modelos lo "gastaría". En
+su lugar, la **validación cruzada de 10 particiones** divide los datos *de
+entrenamiento* en 10 partes (*folds*). El modelo se entrena con 9 partes y se
+evalúa con la restante. Esto se repite 10 veces, de modo que cada parte se
+usa una vez para evaluar. El **promedio** de los 10 resultados estima el
+rendimiento con datos nuevos.
+
+```
+Parte:      1     2     3     4     5     6     7     8     9     10
+Ronda 1:  [PRUEBA][entren...................................]
+Ronda 2:  [entr.][PRUEBA][entren............................]
+...
+Ronda 10: [entren...................................][PRUEBA]
+```
+
+### ¿Qué medidas de rendimiento?
+
+| Métrica | Significado | Buen valor |
+|---------|-------------|------------|
+| **ROC AUC** (estadístico C) | Discriminación: probabilidad de que el modelo dé a un paciente con EAC al azar una probabilidad mayor que a un paciente sin EAC al azar | 0,5 = lanzar una moneda, 1 = perfecto |
+| **Puntuación de Brier** | Error cuadrático medio de las probabilidades predichas (precisión *y* calibración) | 0 = perfecto. Cuanto más bajo, mejor |
+| **Exactitud** (*accuracy*) | % clasificado correctamente con un umbral de 0,5 | Engaña si el desenlace es raro |
+| **Sensibilidad** | % de pacientes con EAC detectados correctamente | Cuanto más alta, mejor |
+| **Especificidad** | % de pacientes sin EAC descartados correctamente | Cuanto más alta, mejor |
+
+```{r cv}
+set.seed(2024)   # la misma semilla en todas las lecciones: todos los modelos se evalúan con las mismas particiones
+heart_folds <- vfold_cv(heart_train, v = 10, strata = disease)
+
+# El conjunto de métricas que calcularemos. Lo reutilizamos en todas las lecciones.
+heart_metrics <- metric_set(roc_auc, brier_class, accuracy, sensitivity, specificity)
+
+logistic_cv <- fit_resamples(
+  logistic_wf,                                  # qué ajustar
+  resamples = heart_folds,                      # dónde ajustarlo (las 10 particiones)
+  metrics   = heart_metrics,                    # qué medir
+  control   = control_resamples(save_pred = TRUE)  # guarda las predicciones (para graficar después)
+)
+
+collect_metrics(logistic_cv)   # mean = promedio de las 10 particiones; std_err = su incertidumbre
+```
+
+## Paso 5: ajuste final y la evaluación única con el conjunto de prueba
+
+`last_fit()` entrena el flujo de trabajo con **todos** los datos de
+entrenamiento y lo evalúa con el **conjunto de prueba**. Este es el número
+que reportas como "rendimiento en datos reservados".
+
+```{r last-fit}
+logistic_final <- last_fit(
+  logistic_wf,
+  split   = heart_split,    # la división original: sabe qué pacientes son de entrenamiento y de prueba
+  metrics = heart_metrics
+)
+
+collect_metrics(logistic_final)   # rendimiento en los 76 pacientes de prueba
+```
+
+### Predicciones para cada paciente de prueba
+
+```{r predictions}
+logistic_preds <- collect_predictions(logistic_final)
+
+logistic_preds |>
+  select(disease, .pred_Yes, .pred_class) |>  # verdad, probabilidad predicha, clase predicha
+  head(10)
+```
+
+`.pred_Yes` es la probabilidad predicha de EAC. `.pred_class` es "Yes"
+cuando esa probabilidad es 0,5 o mayor.
+
+### Matriz de confusión
+
+```{r confusion, fig.height=3, fig.width=4}
+logistic_preds |>
+  conf_mat(truth = disease, estimate = .pred_class) |>  # tabla cruzada de la verdad frente a la predicción
+  autoplot(type = "heatmap")
+```
+
+### Curva ROC
+
+La curva ROC muestra la sensibilidad frente a (1 − especificidad) para
+**todos** los umbrales posibles. Cuanto más se acerque a la esquina superior
+izquierda, mejor.
+
+```{r roc, fig.height=4, fig.width=4}
+logistic_preds |>
+  roc_curve(truth = disease, .pred_Yes) |>   # calcula sensibilidad/especificidad para todos los umbrales
+  autoplot()
+```
+
+### El umbral es una decisión clínica
+
+0,5 no es sagrado. En una prueba de cribado quizá quieras **mayor
+sensibilidad**, aceptando más falsos positivos. Mira qué ocurre con un umbral
+de 0,3:
+
+```{r threshold}
+logistic_preds |>
+  mutate(
+    # nueva clase predicha: "Yes" si la probabilidad es >= 0,3
+    pred_class_30 = factor(if_else(.pred_Yes >= 0.3, "Yes", "No"), levels = c("Yes", "No"))
+  ) |>
+  summarise(
+    sens_at_0.5 = sensitivity_vec(disease, .pred_class),
+    spec_at_0.5 = specificity_vec(disease, .pred_class),
+    sens_at_0.3 = sensitivity_vec(disease, pred_class_30),
+    spec_at_0.3 = specificity_vec(disease, pred_class_30)
+  )
+```
+
+# Parte C: regresión logística penalizada (LASSO) y tu primer *ajuste de hiperparámetros*
+
+**LASSO** es una regresión logística con una **penalización** que encoge los
+coeficientes débiles hacia cero, y algunos *exactamente* a cero. Ventajas:
+
+* Reduce el **sobreajuste** cuando hay muchos predictores en relación con
+  los eventos.
+* Hace **selección de variables** automáticamente.
+
+La fuerza de la penalización (`penalty`, también llamada lambda) es un
+**hiperparámetro**: un ajuste que eliges **tú**, no algo que se aprenda
+directamente de los datos. Encontramos un buen valor **ajustándolo** (*tuning*):
+probamos muchos valores y nos quedamos con el de mejor AUC en validación
+cruzada.
+
+```{r lasso-spec}
+lasso_spec <- logistic_reg(
+  penalty = tune(),   # tune() = "encuentra el mejor valor con validación cruzada"
+  mixture = 1         # 1 = LASSO, 0 = ridge, entre 0 y 1 = elastic net
+) |>
+  set_engine("glmnet")
+
+lasso_wf <- workflow() |>
+  add_recipe(heart_recipe) |>   # la misma receta (normalizar importa aquí: la penalización depende de la escala)
+  add_model(lasso_spec)
+
+# 30 valores de penalización desde 10^-4 (casi sin penalización) hasta 10^0 = 1 (penalización muy fuerte)
+lasso_grid <- grid_regular(penalty(range = c(-4, 0)), levels = 30)
+
+lasso_tune <- tune_grid(
+  lasso_wf,
+  resamples = heart_folds,   # las mismas particiones que antes
+  grid      = lasso_grid,    # los valores candidatos que se prueban
+  metrics   = heart_metrics
+)
+```
+
+```{r lasso-plot, fig.height=4, fig.width=8}
+autoplot(lasso_tune)   # rendimiento (y) para cada valor de penalización (x)
+```
+
+Muy poca penalización sobreajusta. Demasiada penalización elimina
+predictores útiles y el rendimiento cae.
+
+```{r lasso-best}
+show_best(lasso_tune, metric = "roc_auc", n = 5)    # los 5 mejores valores de penalización
+
+best_penalty <- select_best(lasso_tune, metric = "roc_auc")  # el mejor de todos
+best_penalty
+```
+
+> Muchos valores de penalización dan casi el mismo AUC. Si prefieres un
+> modelo **más simple**, con menos variables, usa
+> `select_by_one_std_err(lasso_tune, desc(penalty), metric = "roc_auc")`.
+> Elige la penalización más fuerte cuyo AUC esté a menos de un error estándar
+> del mejor (la "regla de 1 EE").
+
+## Modelo LASSO final
+
+```{r lasso-final}
+lasso_final_wf <- finalize_workflow(lasso_wf, best_penalty)  # pone el mejor valor en el flujo de trabajo
+
+lasso_final <- last_fit(lasso_final_wf, split = heart_split, metrics = heart_metrics)
+
+collect_metrics(lasso_final)
+```
+
+## ¿Qué variables conservó LASSO?
+
+Nota: glmnet modela la probabilidad del **segundo** nivel del desenlace
+("No"), así que sus coeficientes apuntan en sentido contrario. Cambiamos el
+signo para que **positivo signifique mayor riesgo de EAC**.
+
+```{r lasso-coefs, fig.height=5, fig.width=7}
+lasso_coefs <- lasso_final |>
+  extract_fit_parsnip() |>                # saca el modelo ajustado de los resultados
+  tidy() |>                               # convierte los coeficientes en una tabla
+  filter(term != "(Intercept)") |>        # elimina el intercepto
+  mutate(effect_on_CAD = -estimate)       # cambia el signo: positivo = mayor riesgo de EAC
+
+lasso_coefs |> arrange(desc(abs(effect_on_CAD)))   # los efectos mayores primero
+
+ggplot(lasso_coefs, aes(x = effect_on_CAD, y = reorder(term, effect_on_CAD))) +
+  geom_col() +
+  labs(x = "Coeficiente estandarizado (positivo = mayor riesgo de EAC)", y = NULL,
+       title = "Coeficientes LASSO (cero = variable eliminada)") +
+  theme_minimal()
+```
+
+# Guardar los resultados para la comparación de modelos (Lección 6)
+
+```{r save}
+# Predicciones en el conjunto de prueba, etiquetadas con el nombre del modelo
+bind_rows(
+  collect_predictions(logistic_final) |> mutate(model = "Logistic regression"),
+  collect_predictions(lasso_final)    |> mutate(model = "LASSO logistic")
+) |>
+  select(model, .row, disease, .pred_Yes, .pred_class) |>  # .row = identificador del paciente
+  saveRDS("results/pred_logistic.rds")
+
+# Resultados de la validación cruzada (solo para la mejor penalización de LASSO)
+bind_rows(
+  collect_metrics(logistic_cv) |> mutate(model = "Logistic regression"),
+  collect_metrics(lasso_tune) |>
+    filter(.config == best_penalty$.config) |>   # conserva solo la penalización elegida
+    mutate(model = "LASSO logistic")
+) |>
+  select(model, .metric, mean, std_err) |>
+  saveRDS("results/cv_logistic.rds")
+```
+
+# Ideas clave
+
+* Los modelos **explicativos** dan odds ratios. Los **predictivos** se juzgan
+  con **datos no vistos**.
+* El patrón de 5 pasos de tidymodels (**receta → modelo → flujo de trabajo →
+  VC → ajuste final**) es el mismo para todos los algoritmos.
+* Haz todo el preprocesamiento **dentro de la receta** para evitar la fuga de
+  datos.
+* Los **hiperparámetros** (como la penalización de LASSO) se ajustan con
+  **validación cruzada**, nunca con el conjunto de prueba.
+
+# Comprueba lo que has entendido
+
+1. ¿Qué diferencia hay entre la tabla de OR de la Parte A y el AUC de la
+   Parte B?
+2. ¿Por qué el conjunto de prueba se usa una sola vez?
+3. ¿Qué hace la penalización de LASSO con un predictor débil?
+
+# Pruébalo tú
+
+1. Cambia `mixture = 1` por `mixture = 0.5` (elastic net) y vuelve a ejecutar
+   la Parte C. ¿Se conservan más variables?
+2. Prueba un umbral de 0,7 en el bloque del umbral. ¿Qué pasa con la
+   sensibilidad y la especificidad?
+
+# Siguiente
+
+Abre **`03_arboles_y_random_forest.Rmd`**.

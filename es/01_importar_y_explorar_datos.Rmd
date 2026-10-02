@@ -1,0 +1,342 @@
+---
+title: "Lección 1 — Obtener datos públicos reales, limpiarlos y explorarlos"
+author: "Tu nombre"
+date: "`r Sys.Date()`"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Intención del proyecto
+
+> En un estudio real, esta sección es tu **introducción y objetivo**.
+> Escríbela *antes* de tocar los datos. Así evitas "ir de pesca" buscando
+> resultados después.
+
+**Pregunta de investigación.** ¿Pueden las variables clínicas y de la prueba
+de esfuerzo recogidas de rutina predecir si un paciente tiene enfermedad
+arterial coronaria (EAC) confirmada por angiografía?
+
+**Por qué importa.** La coronariografía es invasiva. Un modelo que estime la
+probabilidad de EAC a partir de datos no invasivos podría ayudar a decidir
+quién la necesita.
+
+**Fuente de datos.** El conjunto *Cleveland Heart Disease* del UCI Machine
+Learning Repository: 303 pacientes derivados a angiografía en la Cleveland
+Clinic Foundation (Detrano et al., 1989). Es gratuito y público:
+
+* Janosi A, Steinbrunn W, Pfisterer M, Detrano R. *Heart Disease* [conjunto
+  de datos]. UCI Machine Learning Repository, 1989.
+  <https://doi.org/10.24432/C52P4X>
+
+**Desenlace.** EAC presente (`Yes`, sí) si algún vaso principal tiene un
+estrechamiento del diámetro mayor del 50%; si no, `No`.
+
+**Qué produce esta lección.** Un conjunto de datos limpio y una **división
+fija en entrenamiento y prueba**, guardados en la carpeta `data/` y
+reutilizados en todas las lecciones siguientes, para que todos los modelos se
+comparen exactamente con los mismos pacientes.
+
+# Cargar los paquetes
+
+```{r packages}
+library(tidyverse)   # manejo de datos y gráficos
+library(tidymodels)  # hoy solo necesitamos rsample (la herramienta para dividir datos)
+library(skimr)       # skim(): un resumen rápido de cada variable
+library(gtsummary)   # tbl_summary(): "Tabla 1" con estilo de publicación
+
+theme_gtsummary_language("es")   # las tablas de gtsummary, en español
+```
+
+# Descargar los datos de internet
+
+El archivo es un texto con comas entre los valores (un **CSV**), pero **no
+tiene fila de encabezado** (no tiene nombres de columna) y usa `?` para los
+valores que faltan. Le indicamos ambas cosas a R.
+
+```{r download}
+# La dirección web del archivo de datos. La guardamos como texto en un objeto.
+data_url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/processed.cleveland.data"
+
+# Nombres para las 14 columnas, en el orden indicado en la documentación del conjunto de datos.
+column_names <- c("age", "sex", "chest_pain", "resting_bp", "cholesterol",
+                  "fasting_bs", "rest_ecg", "max_hr", "exercise_angina",
+                  "st_depression", "st_slope", "n_vessels", "thal", "num")
+
+# read_csv() lee un archivo CSV (puede leerlo directamente desde una dirección web).
+heart_raw <- read_csv(
+  data_url,
+  col_names = column_names,   # usa nuestros nombres, porque el archivo no tiene encabezado
+  na = "?"                    # trata "?" como valor faltante (NA en R)
+)
+
+# Guarda una copia sin modificar en tu computadora, para no depender del sitio web.
+# dir.create() crea una carpeta; showWarnings = FALSE evita un aviso si ya existe.
+dir.create("data", showWarnings = FALSE)
+write_csv(heart_raw, "data/heart_raw.csv")
+
+# Mira las primeras filas. head() muestra las 6 primeras por defecto.
+head(heart_raw)
+```
+
+> **Buena práctica de investigación:** mantén los datos originales **sin
+> cambios**. Toda la limpieza se hace con código, para que cualquiera pueda
+> repetirla exactamente.
+
+# Entender las variables (el "diccionario de datos")
+
+Todos los valores están guardados como números, pero muchos son en realidad
+**categorías**. La documentación del conjunto de datos explica cada código:
+
+| Columna | Significado | Codificación |
+|---------|-------------|--------------|
+| `age` | Edad (años) | número |
+| `sex` | Sexo | 0 = mujer, 1 = hombre |
+| `chest_pain` | Tipo de dolor torácico | 1 = angina típica, 2 = angina atípica, 3 = no anginoso, 4 = asintomático |
+| `resting_bp` | Presión arterial sistólica en reposo (mmHg) | número |
+| `cholesterol` | Colesterol sérico (mg/dL) | número |
+| `fasting_bs` | Glucemia en ayunas > 120 mg/dL | 0 = no, 1 = sí |
+| `rest_ecg` | ECG en reposo | 0 = normal, 1 = anomalía ST-T, 2 = hipertrofia ventricular izquierda |
+| `max_hr` | Frecuencia cardíaca máxima en la prueba de esfuerzo | número |
+| `exercise_angina` | Angina inducida por el ejercicio | 0 = no, 1 = sí |
+| `st_depression` | Descenso del ST con el ejercicio respecto al reposo (mm) | número |
+| `st_slope` | Pendiente del segmento ST en el pico del ejercicio | 1 = ascendente, 2 = plana, 3 = descendente |
+| `n_vessels` | Vasos principales coloreados por fluoroscopia | 0–3 |
+| `thal` | Prueba de esfuerzo con talio | 3 = normal, 6 = defecto fijo, 7 = defecto reversible |
+| `num` | Diagnóstico angiográfico | 0 = sin EAC, 1–4 = EAC |
+
+# Limpiar los datos
+
+Aquí convertimos los códigos numéricos en **factores** con etiquetas,
+creamos el desenlace y eliminamos la columna original `num`. Dejar `num`
+permitiría al modelo "hacer trampa", porque *es* la respuesta. Este error se
+llama **fuga del desenlace** (*target leakage*).
+
+> Las etiquetas de las categorías (`"Male"`, `"Asymptomatic"`...) se dejan en
+> inglés, como los nombres de variables, para que el código y sus resultados
+> (por ejemplo, columnas como `sex_Male` en lecciones posteriores) sean
+> idénticos en las dos versiones del curso.
+
+```{r clean}
+heart <- heart_raw |>                 # parte de los datos originales, Y DESPUÉS
+  mutate(                             # crea o reemplaza columnas:
+
+    # factor(x, levels = códigos, labels = nombres) convierte códigos en categorías
+    sex = factor(sex, levels = c(0, 1), labels = c("Female", "Male")),
+
+    chest_pain = factor(chest_pain, levels = 1:4,
+                        labels = c("Typical angina", "Atypical angina",
+                                   "Non-anginal pain", "Asymptomatic")),
+
+    fasting_bs = factor(fasting_bs, levels = c(0, 1), labels = c("No", "Yes")),
+
+    # El código 1 de rest_ecg tiene solo 4 pacientes. Grupos tan pequeños dan
+    # estimaciones inestables, así que unimos los códigos 1 y 2 en "Abnormal".
+    # if_else(condición, valor si es TRUE, valor si es FALSE)
+    rest_ecg = factor(if_else(rest_ecg == 0, "Normal", "Abnormal"),
+                      levels = c("Normal", "Abnormal")),
+
+    exercise_angina = factor(exercise_angina, levels = c(0, 1), labels = c("No", "Yes")),
+
+    st_slope = factor(st_slope, levels = 1:3,
+                      labels = c("Upsloping", "Flat", "Downsloping")),
+
+    thal = factor(thal, levels = c(3, 6, 7),
+                  labels = c("Normal", "Fixed defect", "Reversible defect")),
+
+    # El DESENLACE: "Yes" si num va de 1 a 4, "No" si num es 0.
+    # "Yes" va PRIMERO para que tidymodels lo trate como el evento de interés.
+    disease = factor(if_else(num > 0, "Yes", "No"), levels = c("Yes", "No"))
+  ) |>
+  select(-num)                        # el signo menos elimina la columna num (evita la fuga)
+
+glimpse(heart)   # una línea por columna: su nombre, tipo y primeros valores
+```
+
+¿Por qué nos fijamos en una categoría pequeña? Porque revisamos los
+recuentos. `count()` es la forma de descubrirlo por tu cuenta:
+
+```{r check-counts}
+count(heart_raw, rest_ecg)   # cuántos pacientes hay con cada código original de rest_ecg
+```
+
+# Explorar los datos (EDA)
+
+El **análisis exploratorio de datos** (*exploratory data analysis*, EDA)
+consiste en mirar los datos antes de modelar: valores faltantes,
+distribuciones, valores raros y el equilibrio del desenlace.
+
+## Resumen rápido
+
+```{r skim}
+skim(heart)   # para cada variable: tipo, número de faltantes, media, DE, percentiles, histograma
+```
+
+## Valores faltantes
+
+```{r missing}
+# is.na() es TRUE donde falta un valor. colSums() suma los TRUE de cada columna.
+colSums(is.na(heart))
+```
+
+Solo faltan 6 valores (`n_vessels` 4, `thal` 2). **No** eliminaremos a esos
+pacientes. Los modelos **imputarán** (rellenarán) esos valores *usando solo
+los datos de entrenamiento* (se explica en la Lección 2).
+
+## ¿Está equilibrado el desenlace?
+
+```{r outcome-balance, fig.height=3, fig.width=5}
+heart |>
+  count(disease) |>                          # número de pacientes por desenlace
+  mutate(percent = round(100 * n / sum(n), 1))  # convierte los recuentos en porcentajes
+
+ggplot(heart, aes(x = disease, fill = disease)) +
+  geom_bar() +                                # altura de la barra = número de pacientes
+  labs(x = "Enfermedad arterial coronaria", y = "Número de pacientes") +
+  theme_minimal() +
+  theme(legend.position = "none")             # la leyenda repetiría el eje x
+```
+
+Alrededor del 46% tiene EAC, así que el desenlace está bastante
+**equilibrado**. Con un desenlace raro (por ejemplo, 5%), la exactitud
+(*accuracy*) engaña y haría falta más cuidado (consulta el glosario en
+`README.md`).
+
+## Tabla 1: características de los pacientes según el desenlace
+
+`tbl_summary()` crea en una línea la clásica "Tabla 1" de un artículo
+clínico.
+
+```{r table1}
+heart |>
+  tbl_summary(
+    by = disease,                         # una columna por grupo de desenlace
+    missing_text = "Faltante"             # cómo se etiquetan los valores faltantes
+  ) |>
+  add_overall() |>                        # añade una columna "Total"
+  add_p() |>                              # añade valores p (pruebas de comparación entre grupos)
+  bold_labels()                           # pone en negrita los nombres de variables
+```
+
+## Distribuciones de las variables numéricas
+
+Para dibujar todas las variables numéricas juntas, primero transformamos los
+datos de formato **ancho** (una columna por variable) a formato **largo**
+(una fila por cada par paciente–variable). `pivot_longer()` hace esto.
+
+```{r numeric-plots, fig.height=5, fig.width=9}
+heart |>
+  select(where(is.numeric), disease) |>   # conserva las columnas numéricas y el desenlace
+  pivot_longer(
+    cols = -disease,                      # transforma todas las columnas excepto disease
+    names_to = "variable",                # los nombres de columna antiguos van a "variable"
+    values_to = "value"                   # sus valores van a "value"
+  ) |>
+  ggplot(aes(x = value, fill = disease)) +
+  geom_density(alpha = 0.5) +             # histograma suavizado; alpha = transparencia
+  facet_wrap(~ variable, scales = "free") + # un panel pequeño por variable
+  theme_minimal()
+```
+
+**Qué buscar:** las variables cuyas curvas están claramente separadas (por
+ejemplo `max_hr`, `st_depression` y `n_vessels`) probablemente son buenos
+predictores.
+
+## Variables categóricas frente al desenlace
+
+```{r categorical-plots, fig.height=6, fig.width=9}
+heart |>
+  select(where(is.factor)) |>             # conserva solo las columnas factor (categóricas)
+  pivot_longer(cols = -disease, names_to = "variable", values_to = "category") |>
+  ggplot(aes(x = category, fill = disease)) +
+  geom_bar(position = "fill") +           # "fill" = las barras muestran proporciones, no recuentos
+  facet_wrap(~ variable, scales = "free_x") +
+  labs(y = "Proporción") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))  # inclina las etiquetas
+```
+
+# El paso más importante del ML: dividir los datos
+
+## ¿Por qué dividir?
+
+Un modelo evaluado con los mismos pacientes con los que aprendió parecerá
+mucho mejor de lo que es, porque en parte los **memoriza**. Esto se llama
+**sobreajuste** (*overfitting*). Para obtener una estimación honesta,
+ocultamos algunos pacientes al modelo y lo evaluamos con ellos al final.
+
+* **Conjunto de entrenamiento (75%)**: para construir y ajustar los modelos.
+* **Conjunto de prueba (25%)**: guardado bajo llave y usado **una sola vez**,
+  al final.
+
+`strata = disease` mantiene la misma proporción de EAC en ambos conjuntos
+(**división estratificada**).
+
+```{r split}
+set.seed(2024)   # hace que la división aleatoria sea idéntica cada vez
+
+heart_split <- initial_split(
+  heart,               # los datos que se dividen
+  prop = 0.75,         # 75% entrenamiento, 25% prueba
+  strata = disease     # mantiene una proporción del desenlace similar en ambas partes
+)
+
+heart_split          # muestra los números <Training/Testing/Total>
+
+heart_train <- training(heart_split)   # extrae los pacientes de entrenamiento
+heart_test  <- testing(heart_split)    # extrae los pacientes de prueba
+
+# Comprueba que la proporción del desenlace es similar en ambos conjuntos
+bind_rows(
+  train = count(heart_train, disease),
+  test  = count(heart_test, disease),
+  .id = "set"                          # añade una columna que indica de qué conjunto viene cada fila
+) |>
+  group_by(set) |>
+  mutate(percent = round(100 * n / sum(n), 1))
+```
+
+# Guardar los resultados para las lecciones siguientes
+
+`.rds` es el formato de archivo propio de R. Conserva exactamente los niveles
+de los factores y el objeto de la división.
+
+```{r save}
+saveRDS(heart, "data/heart_clean.rds")        # el conjunto de datos limpio completo
+saveRDS(heart_split, "data/heart_split.rds")  # la división (qué pacientes son de entrenamiento/prueba)
+```
+
+# Ideas clave
+
+* Escribe la **pregunta de investigación y la definición del desenlace antes**
+  de mirar resultados.
+* No modifiques los datos originales. Haz toda la limpieza **con código**.
+* Elimina todo lo que "contenga la respuesta" (**fuga del desenlace**).
+* **Divide antes de modelar.** El conjunto de prueba se usa una vez, al final.
+
+# Comprueba lo que has entendido
+
+1. ¿Por qué eliminamos la columna `num`?
+2. ¿Qué pasaría con nuestra estimación de exactitud si evaluáramos con los
+   datos de entrenamiento?
+3. ¿Qué hace `strata = disease`?
+
+# Pruébalo tú
+
+1. Cambia `prop = 0.75` por `0.8` y vuelve a ejecutar la división. ¿Cuántos
+   pacientes de prueba hay ahora? (Después vuelve a dejarlo como estaba.)
+2. Añade un gráfico de dispersión de `cholesterol` frente a `age`, coloreado
+   según `disease`. Pista:
+   `ggplot(heart, aes(x = age, y = cholesterol, colour = disease)) + geom_point()`.
+
+# Siguiente
+
+Abre **`02_regresion_logistica.Rmd`**.

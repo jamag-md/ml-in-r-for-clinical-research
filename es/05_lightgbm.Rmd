@@ -1,0 +1,216 @@
+---
+title: "Lección 5 — Gradient boosting con LightGBM"
+author: "Tu nombre"
+date: "`r Sys.Date()`"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# El concepto
+
+**LightGBM** (Light Gradient Boosting Machine; Ke et al., 2017, Microsoft) es
+gradient boosting, la misma idea de la Lección 4, con algunas diferencias de
+ingeniería:
+
+| | XGBoost (por defecto) | LightGBM |
+|---|---|---|
+| Cómo crecen los árboles | **Por niveles**: divide todos los nodos de una profundidad antes de bajar | **Por hojas**: divide siempre la hoja que más reduce el error |
+| Velocidad con muchos datos | Rápido | Normalmente **más rápido**: agrupa los valores en histogramas |
+| Variables categóricas | Necesitan columnas dummy | Las maneja **directamente** |
+| Valores faltantes | Los maneja directamente | Los maneja directamente |
+| Ajuste principal de complejidad | `tree_depth` | `num_leaves` (máximo de hojas por árbol) |
+
+```
+Por niveles (XGBoost)           Por hojas (LightGBM)
+        o                              o
+      /   \                          /   \
+     o     o                        o     o
+    / \   / \                            / \
+   o   o o   o                          o   o
+                                           / \
+                                          o   o
+```
+
+**¿Cuándo destaca LightGBM?** Con conjuntos de datos grandes (decenas de
+miles de filas o más) y muchas variables: registros, extracciones de
+historias clínicas electrónicas u ómicas. Con 300 pacientes, como aquí, su
+ventaja de velocidad no se nota y el crecimiento por hojas puede sobreajustar,
+así que conviene mantener los árboles pequeños.
+
+## Hiperparámetros clave
+
+| Nombre en tidymodels | Nombre en LightGBM | Significado |
+|---|---|---|
+| `trees` | `num_iterations` | Número de rondas de boosting |
+| `learn_rate` | `learning_rate` | Tamaño de cada corrección |
+| `min_n` | `min_data_in_leaf` | Mínimo de pacientes por hoja. **Importante con pocos datos** |
+| `num_leaves` (argumento del motor) | `num_leaves` | Máximo de hojas por árbol. Controla la complejidad |
+
+# Cargar paquetes y datos
+
+```{r packages}
+library(tidyverse)
+library(tidymodels)
+library(bonsai)       # añade el motor "lightgbm" a tidymodels
+tidymodels_prefer()
+
+heart_split <- readRDS("data/heart_split.rds")
+heart_train <- training(heart_split)
+heart_test  <- testing(heart_split)
+
+set.seed(2024)
+heart_folds <- vfold_cv(heart_train, v = 10, strata = disease)
+
+heart_metrics <- metric_set(roc_auc, brier_class, accuracy, sensitivity, specificity)
+```
+
+# La receta: casi nada que hacer
+
+LightGBM maneja **directamente las categorías y los valores faltantes**, así
+que la receta solo declara el desenlace y los predictores. No hace falta
+ningún paso.
+
+```{r recipe}
+lgb_recipe <- recipe(disease ~ ., data = heart_train)   # sin pasos de preprocesamiento
+```
+
+# Especificación del modelo con ajuste
+
+```{r lgb-spec}
+lgb_spec <- boost_tree(
+  trees      = tune(),
+  learn_rate = tune(),
+  min_n      = tune()
+) |>
+  set_engine(
+    "lightgbm",
+    num_leaves  = tune(),   # un ajuste propio del motor que también ajustamos
+    num_threads = 1,        # usa 1 núcleo de CPU, para que los resultados sean exactamente reproducibles
+    verbose     = -1        # oculta los mensajes de progreso de LightGBM
+  ) |>
+  set_mode("classification")
+
+lgb_wf <- workflow() |>
+  add_recipe(lgb_recipe) |>
+  add_model(lgb_spec)
+```
+
+## Rangos de búsqueda y cuadrícula
+
+```{r lgb-params}
+lgb_params <- lgb_wf |>
+  extract_parameter_set_dials() |>
+  update(
+    trees      = trees(range = c(100, 1000)),
+    learn_rate = learn_rate(range = c(-3, -0.5)),   # de 0,001 a 0,32
+    min_n      = min_n(range = c(5, 40)),           # al menos 5 pacientes por hoja
+    num_leaves = num_leaves(range = c(4, 31))       # árboles pequeños para pocos datos
+  )
+
+set.seed(2024)
+lgb_grid <- grid_space_filling(lgb_params, size = 30)
+```
+
+```{r lgb-tune}
+lgb_tune <- tune_grid(
+  lgb_wf,
+  resamples = heart_folds,
+  grid      = lgb_grid,
+  metrics   = heart_metrics
+)
+```
+
+```{r lgb-tune-plot, fig.height=6, fig.width=10}
+autoplot(lgb_tune, metric = "roc_auc")
+```
+
+```{r lgb-best}
+show_best(lgb_tune, metric = "roc_auc", n = 5)
+best_lgb <- select_best(lgb_tune, metric = "roc_auc")
+best_lgb
+```
+
+# Modelo final y evaluación con el conjunto de prueba
+
+```{r lgb-final}
+lgb_final_wf <- finalize_workflow(lgb_wf, best_lgb)
+
+lgb_final <- last_fit(lgb_final_wf, split = heart_split, metrics = heart_metrics)
+
+collect_metrics(lgb_final)
+```
+
+```{r lgb-roc, fig.height=4, fig.width=4}
+collect_predictions(lgb_final) |>
+  roc_curve(truth = disease, .pred_Yes) |>
+  autoplot()
+```
+
+# Importancia de las variables
+
+Como LightGBM usó las categorías directamente, la importancia se da por
+**variable original** (p. ej. `thal`), no por columna dummy (p. ej.
+`thal_Reversible.defect`).
+
+```{r lgb-importance, fig.height=4, fig.width=7}
+lgb_booster <- extract_fit_engine(lgb_final)          # el modelo LightGBM en bruto
+
+lgb_importance <- lightgbm::lgb.importance(lgb_booster)
+
+ggplot(lgb_importance, aes(x = Gain, y = reorder(Feature, Gain))) +
+  geom_col(fill = "darkorange") +
+  labs(x = "Importancia (ganancia)", y = NULL, title = "Importancia de las variables en LightGBM") +
+  theme_minimal()
+```
+
+# Guardar los resultados para la Lección 6
+
+```{r save}
+collect_predictions(lgb_final) |>
+  mutate(model = "LightGBM") |>
+  select(model, .row, disease, .pred_Yes, .pred_class) |>  # .row = identificador del paciente
+  saveRDS("results/pred_lgb.rds")
+
+collect_metrics(lgb_tune) |>
+  filter(.config == best_lgb$.config) |>
+  mutate(model = "LightGBM") |>
+  select(model, .metric, mean, std_err) |>
+  saveRDS("results/cv_lgb.rds")
+```
+
+# Ideas clave
+
+* LightGBM es gradient boosting con crecimiento **por hojas** y agrupación en
+  **histogramas**. Es muy rápido con muchos datos.
+* Maneja valores **categóricos y faltantes** sin preprocesamiento.
+* Con pocos datos, controla la complejidad con `num_leaves` y `min_n` para
+  evitar el sobreajuste.
+* Gracias a tidymodels, cambiar de algoritmo solo exigió cambiar la
+  **especificación del modelo** (y simplificar la receta). El resto del
+  código es idéntico.
+
+# Comprueba lo que has entendido
+
+1. ¿Qué diferencia hay entre el crecimiento por niveles y por hojas?
+2. ¿Por qué no necesitamos `step_dummy()` con LightGBM?
+3. ¿Cuándo elegirías LightGBM en lugar de XGBoost?
+
+# Pruébalo tú
+
+1. Cambia el rango de `num_leaves` a `c(2, 8)`. ¿El AUC en el conjunto de
+   prueba mejora o empeora?
+2. Añade `tree_depth = tune()` a `boost_tree()` y un rango
+   `tree_depth = tree_depth(range = c(2, 6))` en `update()`.
+
+# Siguiente
+
+Abre **`06_comparacion_de_modelos.Rmd`**.

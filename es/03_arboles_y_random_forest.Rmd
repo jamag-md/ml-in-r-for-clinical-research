@@ -1,0 +1,258 @@
+---
+title: "Lección 3 — Árboles de decisión y random forests"
+author: "Tu nombre"
+date: "`r Sys.Date()`"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# El concepto
+
+## Paso 1: un solo árbol de decisión
+
+Un **árbol de decisión** hace una serie de preguntas de sí/no, como un
+algoritmo clínico:
+
+```
+¿El dolor torácico es asintomático?
+├── sí → ¿thal es un defecto reversible? → sí → riesgo alto
+└── no → ¿Hay 0 vasos enfermos en la fluoroscopia? → sí → riesgo bajo
+```
+
+La computadora elige cada pregunta (variable + punto de corte) para separar
+lo mejor posible la EAC de la ausencia de EAC.
+
+* **Lo bueno:** fácil de entender, capta interacciones y efectos no
+  lineales, no hace falta reescalar las variables.
+* **Lo malo:** es **inestable**. Si cambias unos pocos pacientes, obtienes un
+  árbol muy distinto. Un árbol profundo **sobreajusta** (memoriza los datos
+  de entrenamiento).
+
+## Paso 2: un random forest = muchos árboles distintos que votan
+
+Un **random forest** o bosque aleatorio (Breiman, 2001) hace crecer cientos de
+árboles, cada uno algo diferente, y **promedia sus votos**:
+
+1. **Bootstrap (bagging):** cada árbol se entrena con una remuestra aleatoria
+   de los pacientes (extraída *con reemplazo*).
+2. **Subconjunto aleatorio de variables:** en cada división, un árbol solo
+   puede elegir entre un subconjunto aleatorio de `mtry` variables. Así los
+   árboles no se parecen todos entre sí.
+3. **Promedio:** la probabilidad predicha es la proporción de árboles que
+   votan "EAC".
+
+Al promediar muchos árboles imperfectos pero distintos, sus errores se
+compensan. Es la "sabiduría de la multitud".
+
+## Los hiperparámetros que vas a ajustar
+
+| Hiperparámetro | Significado | Efecto |
+|----------------|-------------|--------|
+| `mtry` | Número de variables entre las que puede elegir cada división | Pequeño = árboles más diversos. Grande = árboles individuales más fuertes |
+| `min_n` | Mínimo de pacientes en un nodo para seguir dividiéndolo | Pequeño = árboles más profundos y complejos. Grande = árboles más simples |
+| `trees` | Número de árboles | Más es mejor hasta cierto punto (500–1000 suele bastar). Normalmente no se ajusta |
+
+# Cargar paquetes y datos
+
+```{r packages}
+library(tidyverse)
+library(tidymodels)
+tidymodels_prefer()
+
+heart_split <- readRDS("data/heart_split.rds")   # la misma división que en todas las lecciones
+heart_train <- training(heart_split)
+heart_test  <- testing(heart_split)
+
+set.seed(2024)                                    # las mismas particiones que en la Lección 2
+heart_folds <- vfold_cv(heart_train, v = 10, strata = disease)
+
+heart_metrics <- metric_set(roc_auc, brier_class, accuracy, sensitivity, specificity)
+```
+
+# La receta: los árboles necesitan menos preprocesamiento
+
+Los árboles dividen según puntos de corte ("¿la edad es > 55?"), así que
+**no necesitan** variables dummy ni normalización. El paquete `ranger` maneja
+las categorías directamente. Solo rellenamos los valores faltantes.
+
+```{r recipe}
+rf_recipe <- recipe(disease ~ ., data = heart_train) |>
+  step_impute_median(all_numeric_predictors()) |>   # rellena números faltantes (mediana de entrenamiento)
+  step_impute_mode(all_nominal_predictors())        # rellena categorías faltantes (la más frecuente)
+```
+
+# Calentamiento: un árbol de decisión, para ver la idea
+
+```{r single-tree, fig.height=6, fig.width=9}
+tree_spec <- decision_tree(tree_depth = 3) |>  # limita a 3 niveles de preguntas, para que se pueda leer
+  set_engine("rpart") |>                       # rpart = partición recursiva (viene con R)
+  set_mode("classification")
+
+tree_fit <- workflow() |>
+  add_recipe(rf_recipe) |>
+  add_model(tree_spec) |>
+  fit(data = heart_train)                      # fit() entrena con los datos indicados
+
+# Dibuja el árbol. extract_fit_engine() devuelve el objeto rpart subyacente.
+tree_engine <- extract_fit_engine(tree_fit)
+plot(tree_engine, uniform = TRUE, margin = 0.1)   # dibuja las ramas
+text(tree_engine, use.n = TRUE, cex = 0.7)        # añade las etiquetas; use.n muestra los recuentos (Yes/No)
+```
+
+Léelo desde arriba: en cada división, los pacientes que **cumplen la
+condición van a la izquierda**. Las hojas muestran la clase predicha y el
+número de pacientes de entrenamiento `Yes/No` que acabaron en ella.
+
+# Random forest: los 5 pasos de tidymodels
+
+## Especificación del modelo con hiperparámetros por ajustar
+
+```{r rf-spec}
+rf_spec <- rand_forest(
+  mtry  = tune(),     # por ajustar
+  min_n = tune(),     # por ajustar
+  trees = 500         # fijo: 500 árboles
+) |>
+  set_engine(
+    "ranger",
+    importance = "permutation",  # calcula la importancia de las variables (se explica más abajo)
+    seed = 2024                  # hace reproducible el azar interno de ranger
+  ) |>
+  set_mode("classification")
+
+rf_wf <- workflow() |>
+  add_recipe(rf_recipe) |>
+  add_model(rf_spec)
+```
+
+## Ajuste con búsqueda en cuadrícula + validación cruzada
+
+Probamos 5 valores de `mtry` × 5 valores de `min_n` = **25 combinaciones**.
+Cada una se evalúa con validación cruzada de 10 particiones, es decir, 250
+bosques. Puede tardar un minuto.
+
+```{r rf-tune}
+rf_grid <- grid_regular(
+  mtry(range = c(1, 10)),    # tenemos 13 predictores. Probamos de 1 a 10 por división
+  min_n(range = c(2, 30)),   # tamaño mínimo del nodo de 2 a 30 pacientes
+  levels = 5                 # 5 valores de cada uno, espaciados por igual
+)
+
+rf_grid   # mira las combinaciones que vamos a probar
+
+rf_tune <- tune_grid(
+  rf_wf,
+  resamples = heart_folds,
+  grid      = rf_grid,
+  metrics   = heart_metrics
+)
+```
+
+```{r rf-tune-plot, fig.height=5, fig.width=9}
+autoplot(rf_tune)   # una línea por cada valor de min_n. Eje x = mtry
+```
+
+```{r rf-best}
+show_best(rf_tune, metric = "roc_auc", n = 5)
+best_rf <- select_best(rf_tune, metric = "roc_auc")
+best_rf
+```
+
+> **Consejo:** si el mejor valor queda en el **borde** de la cuadrícula (por
+> ejemplo `min_n = 30`), amplía el rango y vuelve a ajustar. El óptimo podría
+> estar más allá. (`mtry` no puede bajar de 1. Un mejor `mtry` de 1 solo
+> significa que árboles muy aleatorios y diversos funcionaron bien en este
+> conjunto de datos pequeño.)
+
+## Modelo final y evaluación con el conjunto de prueba
+
+```{r rf-final}
+rf_final_wf <- finalize_workflow(rf_wf, best_rf)   # coloca los mejores mtry y min_n
+
+rf_final <- last_fit(rf_final_wf, split = heart_split, metrics = heart_metrics)
+
+collect_metrics(rf_final)   # rendimiento en el conjunto de prueba, que no se había tocado
+```
+
+```{r rf-roc, fig.height=4, fig.width=4}
+collect_predictions(rf_final) |>
+  roc_curve(truth = disease, .pred_Yes) |>
+  autoplot()
+```
+
+# ¿Qué variables importan? (importancia de las variables)
+
+Un bosque no tiene odds ratios. En su lugar usamos la **importancia por
+permutación**: se barajan al azar los valores de una variable, lo que
+destruye su información, y se mide cuánto empeora la exactitud de la
+predicción. Una gran caída indica una variable importante.
+
+```{r rf-importance, fig.height=4, fig.width=7}
+rf_importance <- rf_final |>
+  extract_fit_engine() |>            # el modelo ranger que está dentro del flujo de trabajo
+  pluck("variable.importance") |>    # pluck() extrae un elemento de una lista
+  enframe(name = "variable", value = "importance")   # números con nombre a una tabla de dos columnas
+
+ggplot(rf_importance, aes(x = importance, y = reorder(variable, importance))) +
+  geom_col(fill = "forestgreen") +
+  labs(x = "Importancia por permutación (caída de la exactitud al barajar)", y = NULL,
+       title = "Importancia de las variables en el random forest") +
+  theme_minimal()
+```
+
+> **Precaución al interpretar:** la importancia dice **cuánto** depende el
+> modelo de una variable, no la **dirección** (si sube o baja el riesgo), y
+> no implica causalidad. Las variables correlacionadas pueden repartirse o
+> "robarse" importancia entre sí.
+
+# Guardar los resultados para la Lección 6
+
+```{r save}
+collect_predictions(rf_final) |>
+  mutate(model = "Random forest") |>
+  select(model, .row, disease, .pred_Yes, .pred_class) |>  # .row = identificador del paciente
+  saveRDS("results/pred_rf.rds")
+
+collect_metrics(rf_tune) |>
+  filter(.config == best_rf$.config) |>
+  mutate(model = "Random forest") |>
+  select(model, .metric, mean, std_err) |>
+  saveRDS("results/cv_rf.rds")
+```
+
+# Ideas clave
+
+* Un **árbol de decisión** es interpretable pero inestable. Un **random
+  forest** promedia muchos árboles aleatorizados y es mucho más estable y
+  preciso.
+* Hiperparámetros clave: `mtry` y `min_n`. Ajústalos con **validación
+  cruzada**.
+* Los árboles necesitan poco preprocesamiento: sin dummies ni reescalado.
+* Usa la **importancia por permutación** para ver en qué se apoya el modelo.
+
+# Comprueba lo que has entendido
+
+1. ¿Qué dos fuentes de azar hacen que los árboles de un bosque sean
+   distintos?
+2. ¿Por qué un solo árbol profundo sobreajusta?
+3. ¿Qué **no** te dice la importancia por permutación?
+
+# Pruébalo tú
+
+1. Cambia `trees = 500` por `trees = 100` y después por `2000`. ¿Cambia mucho
+   el AUC en el conjunto de prueba?
+2. Cambia `tree_depth = 3` por `5` en el árbol único. ¿Se sigue pudiendo
+   leer?
+
+# Siguiente
+
+Abre **`04_xgboost.Rmd`**.

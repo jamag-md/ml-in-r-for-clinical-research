@@ -1,0 +1,282 @@
+---
+title: "Lección 0 — Configuración y lo básico de R que necesitas"
+author: "Tu nombre"
+date: "`r Sys.Date()`"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+# Este bloque oculto define opciones para todo el documento.
+# echo = TRUE significa "mostrar el código en el informe final".
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Para qué sirve esta lección
+
+Antes de construir modelos de aprendizaje automático (*machine learning*, ML)
+necesitas tres cosas:
+
+1. **Las herramientas instaladas** (R, RStudio y algunos *paquetes*
+   complementarios).
+2. **Saber cómo funciona un archivo R Markdown**, porque cada lección es uno.
+3. **Unas 10 ideas de R** que verás en todas las lecciones. **No** necesitas
+   convertirte en programador. Necesitas poder *leer* código y modificarlo.
+
+Tiempo necesario: 1–2 horas.
+
+# Instalar el software (solo una vez)
+
+| Paso | Qué | Dónde |
+|------|-----|-------|
+| 1 | **R**, el lenguaje que hace los cálculos (probado con R 4.6.1) | <https://cran.r-project.org> |
+| 2 | **RStudio Desktop**, el programa en el que escribes | <https://posit.co/download/rstudio-desktop/> |
+| 3 | **Paquetes**, complementos gratuitos que contienen los métodos de ML | Sección 4 más abajo |
+
+> **Consejo:** instala primero R y después RStudio. RStudio encuentra R
+> automáticamente.
+
+# Un recorrido por RStudio
+
+Al abrir RStudio verás cuatro paneles:
+
+| Panel | Posición habitual | Para qué sirve |
+|-------|-------------------|----------------|
+| **Source / editor** | arriba a la izquierda | Donde está abierto este archivo `.Rmd`. Aquí escribes y editas. |
+| **Console** (consola) | abajo a la izquierda | Donde se ejecuta realmente el código. Aquí aparecen resultados y errores. |
+| **Environment** (entorno) | arriba a la derecha | Lista los objetos (datos, modelos) que hay en memoria. |
+| **Files / Plots / Help** | abajo a la derecha | Tus carpetas, tus gráficos y las páginas de ayuda. |
+
+> RStudio está en inglés, así que los nombres de botones y menús aparecen en
+> inglés en esta guía.
+
+## Abre el curso como *Project* (proyecto)
+
+Haz doble clic en **`curso_ML_en_R.Rproj`**, en esta carpeta. Así RStudio se
+abre *dentro* de la carpeta del curso y las rutas como
+`data/heart_clean.rds` siempre funcionan. **Abre siempre el curso de esta
+manera.**
+
+## Cómo funciona un archivo R Markdown (`.Rmd`)
+
+Un archivo `.Rmd` combina tres cosas:
+
+1. **El encabezado** (la parte entre las líneas `---` del principio): título,
+   autor y formato de salida.
+2. **Texto normal**, como este párrafo. Aquí escribes la intención del
+   proyecto, los métodos y la interpretación, como en un artículo.
+3. **Bloques de código** (*chunks*), los recuadros grises que empiezan con
+   ```` ```{r} ````. Solo estos se ejecutan como código R.
+
+Atajos de teclado que usarás constantemente:
+
+| Acción | Atajo en Windows | Botón |
+|--------|------------------|-------|
+| Ejecutar la línea actual o la selección | `Ctrl + Enter` | "Run" |
+| Ejecutar todo el bloque | `Ctrl + Shift + Enter` | ▶ verde del bloque |
+| Ejecutar todos los bloques anteriores | `Ctrl + Alt + P` | ▼ gris del bloque |
+| **Knit** (generar el informe HTML completo) | `Ctrl + Shift + K` | "Knit" (ovillo de lana) |
+| Insertar un bloque nuevo | `Ctrl + Alt + I` | botón "+C" |
+
+> **Cómo aprender con estos archivos:** ejecuta los bloques **de uno en uno**
+> con el ▶ verde, lee el resultado y solo entonces sigue. Al terminar, pulsa
+> **Knit** para obtener un informe HTML limpio con todo.
+
+# Instalar los paquetes (solo una vez)
+
+Un *paquete* es un conjunto de funciones escritas por otras personas. Un
+paquete se instala **una vez** con `install.packages()` y se *carga* **en cada
+sesión** con `library()`. Es como instalar una aplicación en el teléfono una
+vez y abrirla cada vez que la necesitas.
+
+El bloque siguiente tiene `eval=FALSE`, así que **no** se ejecuta al hacer
+Knit. Ejecútalo **a mano una vez**: pon el cursor dentro del bloque y pulsa
+`Ctrl + Shift + Enter`. Puede tardar 5–10 minutos.
+
+```{r install-packages, eval=FALSE}
+# c() significa "combinar". Crea una lista de nombres de paquetes (el texto va entre comillas).
+packages_needed <- c(
+  "tidyverse",   # manejo de datos (dplyr) y gráficos (ggplot2)
+  "tidymodels",  # un conjunto coherente de herramientas de ML: dividir, preprocesar, ajustar, evaluar
+  "gtsummary",   # "Tabla 1" y tablas de regresión listas para publicar
+  "broom.helpers", # lo necesita gtsummary para las tablas de regresión
+  "skimr",       # resumen rápido de todas las variables de un conjunto de datos
+  "glmnet",      # regresión logística penalizada (LASSO / ridge)
+  "ranger",      # random forests rápidos
+  "xgboost",     # gradient boosting con XGBoost
+  "lightgbm",    # gradient boosting con LightGBM
+  "bonsai"       # conecta LightGBM con tidymodels
+)
+
+# Quedarse solo con los paquetes que aún no están instalados.
+# installed.packages() lista lo que tienes; rownames() extrae los nombres.
+# setdiff(A, B) da los elementos de A que no están en B.
+missing_packages <- setdiff(packages_needed, rownames(installed.packages()))
+
+# Instalar lo que falte. Si no falta nada, no hace nada.
+install.packages(missing_packages)
+```
+
+Comprueba que todo se carga. Si una línea da un error como
+`there is no package called 'xxx'` ("no hay ningún paquete llamado 'xxx'"),
+ejecuta `install.packages("xxx")` en la consola.
+
+```{r load-check}
+library(tidyverse)   # carga ggplot2, dplyr, readr, tidyr y otros
+library(tidymodels)  # carga rsample, recipes, parsnip, tune, yardstick y otros
+library(bonsai)      # hace que LightGBM esté disponible dentro de tidymodels
+
+# R.version.string es un texto incorporado con tu versión de R.
+R.version.string
+```
+
+# Las ideas de R que necesitas (y nada más)
+
+> En este curso los **nombres de variables y funciones están en inglés**,
+> igual que en la versión original. Así el código es idéntico en los dos
+> idiomas y coincide con la documentación de R, que está en inglés. Las
+> explicaciones y los comentarios sí están en español.
+
+## Objetos y la flecha de asignación `<-`
+
+`<-` significa "guarda el resultado de la derecha con el nombre de la
+izquierda". Ese nombre aparece entonces en el panel **Environment**.
+
+```{r objects}
+age <- 63            # guarda el número 63 con el nombre "age" (edad)
+age                  # escribir solo un nombre muestra su valor
+age_in_months <- age * 12   # hace cálculos con él y guarda el resultado
+age_in_months
+```
+
+## Vectores: muchos valores en un solo objeto
+
+```{r vectors}
+# c() combina valores en un "vector" (una columna de valores del mismo tipo)
+cholesterol <- c(233, 286, 229, 250, 204)
+
+mean(cholesterol)    # mean() es una función: el nombre y, entre paréntesis, la entrada
+length(cholesterol)  # cuántos valores hay
+cholesterol > 240    # compara cada valor; da TRUE o FALSE para cada uno
+```
+
+## Funciones y sus *argumentos*
+
+Una función se escribe `nombre(argumento1 = valor, argumento2 = valor)`. Para
+leer la página de ayuda de cualquier función, escribe `?` y el nombre en la
+consola, por ejemplo `?mean`.
+
+```{r functions}
+# round() recibe un número y cuántos decimales conservar.
+round(3.14159, digits = 2)
+
+# Si das los argumentos en el orden documentado, puedes omitir sus nombres:
+round(3.14159, 2)
+```
+
+## Data frames (tibbles): tu conjunto de datos
+
+Un **data frame** es una tabla: las filas son pacientes (observaciones) y las
+columnas son variables. La versión de tidyverse se llama **tibble**.
+
+```{r dataframes}
+# tibble() crea una tabla pequeña. Cada argumento se convierte en una columna.
+patients <- tibble(
+  id      = 1:4,                          # 1:4 significa 1, 2, 3, 4
+  age     = c(63, 67, 37, 41),
+  sex     = c("Male", "Male", "Male", "Female"),
+  disease = c("No", "Yes", "No", "No")
+)
+
+patients            # muestra la tabla
+nrow(patients)      # número de filas
+patients$age        # el signo $ extrae una columna
+```
+
+## Factores: variables categóricas
+
+Un **factor** es la forma en que R guarda una variable categórica (por
+ejemplo, sexo, o enfermedad sí/no). Las funciones de ML necesitan que los
+desenlaces categóricos estén guardados como factores.
+
+```{r factors}
+patients$disease <- factor(patients$disease, levels = c("Yes", "No"))
+levels(patients$disease)  # las categorías, en el orden fijado
+```
+
+> **Recuerda para más adelante:** en **tidymodels**, el **primer nivel** del
+> factor del desenlace se trata como el "evento" (lo que intentamos predecir).
+> Por eso ponemos `"Yes"` (sí) primero.
+
+## El pipe `|>`: "y después..."
+
+El *pipe* (tubería) pasa el resultado de su izquierda a la función de su
+derecha. Léelo en voz alta como **"y después"**.
+
+```{r pipe}
+patients |>                      # toma la tabla de pacientes, Y DESPUÉS
+  filter(age > 40) |>            # conserva solo las filas con edad mayor de 40, Y DESPUÉS
+  select(id, age, disease)       # conserva solo estas tres columnas
+```
+
+Los principales **verbos de dplyr** (todos se usan en las lecciones):
+
+| Verbo | Qué hace |
+|-------|----------|
+| `filter()` | conserva las filas que cumplen una condición |
+| `select()` | conserva (o elimina) columnas |
+| `mutate()` | crea o modifica una columna |
+| `summarise()` | resume muchas filas en una (media, recuento...) |
+| `group_by()` | hace el paso siguiente por separado para cada grupo |
+| `count()` | cuenta filas por categoría |
+
+## Gráficos con ggplot2
+
+`ggplot()` construye un gráfico por capas unidas con `+` (no con `|>`).
+
+```{r ggplot-demo, fig.height=3, fig.width=5}
+ggplot(patients, aes(x = disease, y = age)) +  # los datos y qué columnas van en cada eje
+  geom_point(size = 3) +                        # dibuja puntos
+  labs(title = "Edad según la enfermedad")      # añade un título
+```
+
+## Reproducibilidad: `set.seed()`
+
+El ML usa el azar (divisiones aleatorias de los datos, árboles aleatorios).
+`set.seed(número)` hace que los resultados "aleatorios" sean **los mismos
+cada vez que ejecutas el código**, algo imprescindible en la investigación
+reproducible.
+
+```{r seed}
+set.seed(123)
+sample(1:10, 3)   # elige 3 números al azar entre 1 y 10
+set.seed(123)
+sample(1:10, 3)   # misma semilla, así que exactamente los mismos 3 números
+```
+
+# Cuando aparece un error
+
+1. **Lee la última línea del texto rojo.** Normalmente dice qué está mal.
+2. Causas frecuentes: un error al escribir un nombre, falta un paréntesis o
+   una coma, un paquete sin cargar (ejecuta el bloque con `library()`), o
+   bloques ejecutados en desorden.
+3. Pulsa **Session → Restart R** y después usa el ▼ gris ("ejecutar todos los
+   bloques anteriores").
+4. Copia el error en un buscador o pregunta a un asistente de IA. Incluye el
+   código que lo produjo.
+
+# Comprueba lo que has entendido
+
+1. ¿Qué diferencia hay entre `install.packages()` y `library()`?
+2. ¿Qué hace `<-`?
+3. En `patients |> filter(age > 40)`, ¿qué significa `|>`?
+4. ¿Por qué hay que usar `set.seed()` en la investigación con ML?
+
+# Siguiente
+
+Abre **`01_importar_y_explorar_datos.Rmd`**.

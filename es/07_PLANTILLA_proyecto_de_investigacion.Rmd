@@ -1,0 +1,466 @@
+---
+title: "✏️ Predicción de malignidad en punciones con aguja fina de mama mediante machine learning"
+subtitle: "Plantilla de proyecto de investigación (ejemplo resuelto: datos Breast Cancer Wisconsin Diagnostic)"
+author: "✏️ Tu nombre, institución"
+date: "`r Sys.Date()`"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+    code_folding: hide
+---
+
+```{r setup, include=FALSE}
+# code_folding: hide (en el encabezado) oculta el código del informe HTML tras
+# botones "Code", para que el informe se lea como un artículo. Cámbialo a "show" para ver todo el código.
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+<!--
+=====================================================================
+CÓMO USAR ESTA PLANTILLA  (este bloque es un comentario HTML: nunca
+aparece en el informe generado)
+
+1. Guarda una copia con otro nombre (File > Save As), p. ej. "mi_estudio.Rmd".
+2. Busca el símbolo del lápiz ✏️. Cada lugar marcado con ✏️ es algo que
+   debes editar. Lo demás normalmente puede quedarse como está.
+3. El ÚNICO requisito estricto: la sección "Preparación de los datos" debe
+   crear un data frame llamado `study_data` que contenga
+      * una columna llamada `outcome`: un factor con niveles c("Yes", "No"),
+        donde "Yes" es el evento que quieres predecir, y
+      * SOLO las columnas predictoras (sin identificadores, sin fechas, nada
+        medido después del desenlace, nada que "contenga la respuesta").
+4. Primero ejecuta bloque a bloque (▶ verde). Cuando todo funcione, haz Knit.
+=====================================================================
+-->
+
+# Antecedentes ✏️
+
+*Explica qué se sabe, qué no se sabe y por qué importa la predicción aquí.*
+
+El diagnóstico del cáncer de mama se apoya a menudo en la citología por
+punción aspiración con aguja fina (PAAF). Las características cuantitativas
+de los núcleos celulares, medidas en imágenes digitalizadas de la PAAF,
+podrían ayudar a distinguir masas malignas de benignas. Este estudio compara
+modelos clásicos y de machine learning (ML) para esta tarea.
+
+# Objetivos ✏️
+
+* **Principal:** desarrollar y validar internamente modelos que predigan la
+  malignidad a partir de características nucleares de imágenes de PAAF.
+* **Secundarios:** comparar la regresión logística, LASSO, random forest,
+  XGBoost y LightGBM en discriminación, calibración y utilidad clínica, e
+  identificar las características más influyentes.
+
+*Escríbelos **antes** de analizar los datos y, a ser posible, regístralos.*
+
+# Métodos
+
+## Fuente de datos ✏️
+
+Conjunto de datos Breast Cancer Wisconsin (Diagnostic): 569 muestras de PAAF
+de los University of Wisconsin Hospitals (Wolberg, Street, Mangasarian).
+Público a través del UCI Machine Learning Repository:
+
+* Wolberg W, Mangasarian O, Street N, Street W. *Breast Cancer Wisconsin
+  (Diagnostic)* [conjunto de datos]. UCI Machine Learning Repository, 1993.
+  <https://doi.org/10.24432/C5DW2B>
+
+## Desenlace ✏️
+
+Masa **maligna** confirmada histológicamente (`Yes`) frente a **benigna**
+(`No`).
+
+## Predictores ✏️
+
+Diez características nucleares (radio, textura, perímetro, área, suavidad,
+compacidad, concavidad, puntos cóncavos, simetría, dimensión fractal), cada
+una resumida como **media**, **error estándar** y **peor valor** (media de
+los 3 valores más grandes) por imagen: 30 predictores en total.
+
+## Preparación de los datos
+
+```{r packages}
+library(tidyverse)
+library(tidymodels)
+library(bonsai)
+library(gtsummary)
+tidymodels_prefer()
+theme_gtsummary_language("es")   # las tablas de gtsummary, en español
+
+dir.create("data", showWarnings = FALSE)
+```
+
+```{r data-import}
+# ✏️ ---- REEMPLAZA ESTE BLOQUE POR LA IMPORTACIÓN DE TUS PROPIOS DATOS --------
+# Ejemplos:
+#   my_raw <- read_csv("data/mi_archivo.csv")            # archivo CSV
+#   my_raw <- readxl::read_excel("data/mi_archivo.xlsx") # archivo de Excel
+#   my_raw <- haven::read_sav("data/mi_archivo.sav")     # archivo de SPSS
+
+data_url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/breast-cancer-wisconsin/wdbc.data"
+
+measures <- c("radius", "texture", "perimeter", "area", "smoothness",
+              "compactness", "concavity", "concave_points", "symmetry",
+              "fractal_dimension")
+
+# El archivo tiene: ID, diagnóstico y después las 10 medias, los 10 errores estándar y los 10 "peores" valores
+column_names <- c("id", "diagnosis",
+                  paste0(measures, "_mean"),   # paste0() une textos: "radius" + "_mean" = "radius_mean"
+                  paste0(measures, "_se"),
+                  paste0(measures, "_worst"))
+
+raw_data <- read_csv(data_url, col_names = column_names)
+write_csv(raw_data, "data/wdbc_raw.csv")   # guarda una copia local sin modificar
+```
+
+```{r data-cleaning}
+# ✏️ ---- ADAPTA: crea `study_data` con `outcome` (Yes/No) + solo los predictores ----
+study_data <- raw_data |>
+  mutate(outcome = factor(if_else(diagnosis == "M", "Yes", "No"),   # M = maligno = el evento
+                          levels = c("Yes", "No"))) |>              # "Yes" DEBE ser el primer nivel
+  select(-id, -diagnosis)                                           # elimina el ID y el desenlace original
+
+# Comprobaciones de seguridad: detienen el Knit con un mensaje claro si algo está mal
+stopifnot("outcome" %in% names(study_data))
+stopifnot(identical(levels(study_data$outcome), c("Yes", "No")))
+
+glimpse(study_data)
+```
+
+## Análisis estadístico
+
+*(Este párrafo está escrito para coincidir con el código de abajo. Actualízalo
+si cambias el código.)*
+
+Los datos se dividieron al azar en un conjunto de desarrollo (75%) y un
+conjunto de prueba reservado (25%), estratificando por el desenlace. Los
+valores faltantes se imputaron (mediana para predictores continuos, moda para
+categóricos) **dentro** de cada paso de remuestreo para evitar la fuga de
+información. Se desarrollaron cinco modelos: regresión logística sin
+penalizar, regresión logística LASSO, random forest (`ranger`), XGBoost y
+LightGBM. Los hiperparámetros se ajustaron mediante validación cruzada de 10
+particiones en el conjunto de desarrollo, usando una cuadrícula space-filling
+de 20 candidatos por modelo y eligiendo el valor con el mayor ROC AUC. Los
+modelos finales se reajustaron con todo el conjunto de desarrollo y se
+evaluaron una sola vez en el conjunto de prueba. La **discriminación** se
+evaluó con el ROC AUC, la **exactitud global de las probabilidades** con la
+puntuación de Brier y la **calibración** con gráficos de calibración. Los IC
+95% se obtuvieron con 1000 remuestras bootstrap del conjunto de prueba. La
+**utilidad clínica** se evaluó con análisis de curvas de decisión. La
+importancia de las características del mejor modelo se estimó por permutación
+en el conjunto de prueba. Los análisis se hicieron con R `r getRversion()` y
+tidymodels. El reporte sigue TRIPOD+AI.
+
+```{r split}
+set.seed(2024)                                                     # ✏️ cualquier número, pero repórtalo
+data_split <- initial_split(study_data, prop = 0.75, strata = outcome)
+train_data <- training(data_split)
+test_data  <- testing(data_split)
+
+set.seed(2024)
+cv_folds <- vfold_cv(train_data, v = 10, strata = outcome)        # ✏️ v = 5 es más rápido
+
+my_metrics <- metric_set(roc_auc, brier_class, accuracy, sensitivity, specificity)
+```
+
+# Resultados
+
+## Población de estudio
+
+Hubo `r nrow(study_data)` muestras, de las cuales
+`r sum(study_data$outcome == "Yes")`
+(`r round(100 * mean(study_data$outcome == "Yes"), 1)`%) presentaron el
+desenlace. El conjunto de desarrollo tuvo `r nrow(train_data)` muestras y el
+de prueba `r nrow(test_data)`.
+
+```{r table1}
+# ✏️ elige qué variables mostrar en la Tabla 1 (aquí: solo las 10 características "_mean")
+study_data |>
+  select(outcome, ends_with("_mean")) |>
+  tbl_summary(by = outcome) |>
+  add_overall() |>
+  add_p() |>
+  modify_caption("**Tabla 1. Características según el desenlace**")
+```
+
+```{r missing-check}
+# Número de valores faltantes por variable (solo las que tienen alguno)
+missing_counts <- colSums(is.na(study_data))
+missing_counts[missing_counts > 0]
+```
+
+## Desarrollo de los modelos
+
+```{r model-specs}
+# ---- Recetas de preprocesamiento -----------------------------------------
+# Para modelos lineales y XGBoost: imputar, crear dummies, quitar columnas constantes, estandarizar
+recipe_norm <- recipe(outcome ~ ., data = train_data) |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_impute_mode(all_nominal_predictors()) |>
+  step_dummy(all_nominal_predictors()) |>
+  step_zv(all_predictors()) |>
+  step_normalize(all_numeric_predictors())
+
+# Para random forest y LightGBM: solo imputar (manejan las categorías por sí mismos)
+recipe_basic <- recipe(outcome ~ ., data = train_data) |>
+  step_impute_median(all_numeric_predictors()) |>
+  step_impute_mode(all_nominal_predictors())
+
+# ---- Especificaciones de los modelos --------------------------------------
+logistic_spec <- logistic_reg() |> set_engine("glm")
+
+lasso_spec <- logistic_reg(penalty = tune(), mixture = 1) |> set_engine("glmnet")
+
+rf_spec <- rand_forest(mtry = tune(), min_n = tune(), trees = 500) |>
+  set_engine("ranger", seed = 2024) |>
+  set_mode("classification")
+
+xgb_spec <- boost_tree(trees = tune(), tree_depth = tune(), learn_rate = tune(),
+                       min_n = tune(), sample_size = 0.8) |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+
+lgb_spec <- boost_tree(trees = tune(), learn_rate = tune(), min_n = tune()) |>
+  set_engine("lightgbm", num_leaves = tune(), num_threads = 1, verbose = -1) |>
+  set_mode("classification")
+
+# ---- Emparejar cada receta con su modelo en un "workflow set" --------------
+# cross = FALSE los empareja por posición (1.ª receta + 1.er modelo, 2.ª + 2.º, ...)
+model_set <- workflow_set(
+  preproc = list(norm = recipe_norm, norm = recipe_norm, basic = recipe_basic,
+                 norm = recipe_norm, basic = recipe_basic),
+  models  = list(logistic = logistic_spec, lasso = lasso_spec, rf = rf_spec,
+                 xgb = xgb_spec, lgb = lgb_spec),
+  cross   = FALSE
+)
+
+# Rangos de búsqueda razonables para los modelos de boosting (ver Lecciones 4 y 5)
+xgb_params <- workflow(recipe_norm, xgb_spec) |>
+  extract_parameter_set_dials() |>
+  update(trees = trees(c(100, 1000)), tree_depth = tree_depth(c(1, 6)),
+         learn_rate = learn_rate(c(-3, -0.5)), min_n = min_n(c(2, 30)))
+
+lgb_params <- workflow(recipe_basic, lgb_spec) |>
+  extract_parameter_set_dials() |>
+  update(trees = trees(c(100, 1000)), learn_rate = learn_rate(c(-3, -0.5)),
+         min_n = min_n(c(5, 40)), num_leaves = num_leaves(c(4, 31)))
+
+model_set <- model_set |>
+  option_add(param_info = xgb_params, id = "norm_xgb") |>
+  option_add(param_info = lgb_params, id = "basic_lgb")
+
+model_set   # una fila por modelo ("wflow_id")
+```
+
+```{r tuning}
+# Ajusta todos los modelos con las mismas particiones. Es el paso lento (unos minutos).
+# Un modelo sin nada que ajustar (la logística simple) solo se evalúa con validación cruzada.
+model_results <- workflow_map(
+  model_set,
+  fn        = "tune_grid",
+  resamples = cv_folds,
+  grid      = 20,            # ✏️ 20 configuraciones candidatas por modelo
+  metrics   = my_metrics,
+  seed      = 2024,
+  verbose   = FALSE          # ponlo en TRUE para ver mensajes de progreso
+)
+```
+
+```{r cv-ranking, fig.height=4, fig.width=7}
+# Los nombres de los modelos se dejan en inglés porque el código los usa como identificadores
+model_labels <- c(norm_logistic = "Logistic regression", norm_lasso = "LASSO logistic",
+                  basic_rf = "Random forest", norm_xgb = "XGBoost", basic_lgb = "LightGBM")
+
+rank_results(model_results, rank_metric = "roc_auc", select_best = TRUE) |>
+  filter(.metric == "roc_auc") |>
+  transmute(Modelo = model_labels[wflow_id], `AUC en VC` = mean, EE = std_err, Puesto = rank) |>
+  knitr::kable(digits = 3, caption = "Tabla 2. AUC en validación cruzada (mejor configuración de cada modelo)")
+
+autoplot(model_results, rank_metric = "roc_auc", metric = "roc_auc", select_best = TRUE) +
+  labs(title = "AUC en validación cruzada, mejor configuración de cada modelo")
+```
+
+## Rendimiento en el conjunto de prueba reservado
+
+```{r final-fits}
+# Para cada modelo: toma sus mejores hiperparámetros, reajusta con todos los datos de entrenamiento y evalúa una vez
+final_fits <- map(model_results$wflow_id, function(id) {
+  best_params <- model_results |>
+    extract_workflow_set_result(id) |>
+    select_best(metric = "roc_auc")
+  model_results |>
+    extract_workflow(id) |>
+    finalize_workflow(best_params) |>
+    last_fit(split = data_split, metrics = my_metrics)
+}) |>
+  set_names(model_results$wflow_id)   # nombra cada resultado con el identificador de su modelo
+
+# IC 95% bootstrap de las métricas de prueba (int_pctl = intervalos por percentiles)
+test_results <- imap(final_fits, function(fit, id) {      # imap da cada elemento Y su nombre
+  set.seed(2024)
+  int_pctl(fit, times = 1000) |> mutate(model = model_labels[id])
+}) |>
+  list_rbind()
+
+test_results |>
+  filter(.metric %in% c("roc_auc", "brier_class", "sensitivity", "specificity")) |>
+  mutate(value = sprintf("%.3f (%.3f–%.3f)", .estimate, .lower, .upper)) |>
+  select(model, .metric, value) |>
+  pivot_wider(names_from = .metric, values_from = value) |>
+  knitr::kable(caption = "Tabla 3. Rendimiento en el conjunto de prueba, estimación (IC 95% bootstrap)")
+```
+
+```{r test-preds}
+test_preds <- imap(final_fits, function(fit, id) {
+  collect_predictions(fit) |> mutate(model = model_labels[id])
+}) |>
+  list_rbind() |>
+  mutate(model = factor(model, levels = unname(model_labels)))   # mantiene los modelos en un orden fijo
+```
+
+```{r roc-plot, fig.height=5, fig.width=6}
+test_preds |>
+  group_by(model) |>
+  roc_curve(truth = outcome, .pred_Yes) |>
+  autoplot() +
+  labs(title = "Figura 1. Curvas ROC, conjunto de prueba")
+```
+
+```{r calibration-plot, fig.height=5, fig.width=9}
+test_preds |>
+  group_by(model) |>
+  mutate(risk_group = ntile(.pred_Yes, 5)) |>     # ✏️ usa 10 grupos si tu conjunto de prueba es grande
+  group_by(model, risk_group) |>
+  summarise(predicted = mean(.pred_Yes), observed = mean(outcome == "Yes"),
+            n = n(), .groups = "drop") |>
+  ggplot(aes(predicted, observed)) +
+  geom_abline(linetype = "dashed", colour = "grey50") +
+  geom_line(colour = "steelblue") +
+  geom_point(colour = "steelblue", size = 2) +
+  facet_wrap(~ model) +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +
+  labs(x = "Probabilidad predicha", y = "Proporción observada",
+       title = "Figura 2. Calibración, conjunto de prueba") +
+  theme_minimal()
+```
+
+```{r dca, fig.height=5, fig.width=8}
+thresholds <- tibble(threshold = seq(0.05, 0.80, by = 0.01))
+prevalence <- mean(test_data$outcome == "Yes")
+
+model_curves <- test_preds |>
+  cross_join(thresholds) |>
+  group_by(model, threshold) |>
+  summarise(tp_rate = sum(.pred_Yes >= threshold & outcome == "Yes") / n(),   # verdaderos positivos / n
+            fp_rate = sum(.pred_Yes >= threshold & outcome == "No")  / n(),   # falsos positivos / n
+            .groups = "drop") |>
+  mutate(net_benefit = tp_rate - fp_rate * threshold / (1 - threshold),
+         model = as.character(model))
+
+treat_all <- thresholds |>
+  mutate(model = "Tratar a todos",
+         net_benefit = prevalence - (1 - prevalence) * threshold / (1 - threshold))
+
+bind_rows(model_curves, treat_all) |>
+  ggplot(aes(threshold, net_benefit, colour = model)) +
+  geom_line(linewidth = 0.8) +
+  geom_hline(yintercept = 0) +
+  coord_cartesian(ylim = c(-0.05, prevalence + 0.05)) +
+  labs(x = "Umbral de riesgo", y = "Beneficio neto", colour = NULL,
+       title = "Figura 3. Análisis de curvas de decisión, conjunto de prueba") +
+  theme_minimal()
+```
+
+## Importancia de las características del mejor modelo
+
+La **importancia por permutación** funciona con *cualquier* modelo: se baraja
+un predictor y se mide cuánto cae el AUC en el conjunto de prueba.
+
+```{r permutation-importance, fig.height=6, fig.width=7}
+best_id <- test_results |>
+  filter(.metric == "roc_auc") |>
+  slice_max(.estimate, n = 1, with_ties = FALSE) |>
+  pull(model)
+best_id <- names(model_labels)[model_labels == best_id]   # convierte la etiqueta de nuevo en el identificador
+best_workflow <- extract_workflow(final_fits[[best_id]])  # el flujo de trabajo entrenado
+
+permutation_importance <- function(fitted_wf, data, n_repeats = 10) {
+  # AUC con los datos originales
+  baseline <- roc_auc_vec(data$outcome, predict(fitted_wf, data, type = "prob")$.pred_Yes)
+  predictors <- setdiff(names(data), "outcome")
+  map(predictors, function(var) {
+    drops <- map_dbl(1:n_repeats, function(r) {
+      shuffled <- data
+      shuffled[[var]] <- sample(shuffled[[var]])   # destruye la información de esta variable
+      baseline - roc_auc_vec(shuffled$outcome,
+                             predict(fitted_wf, shuffled, type = "prob")$.pred_Yes)
+    })
+    tibble(variable = var, importance = mean(drops))
+  }) |>
+    list_rbind()
+}
+
+set.seed(2024)
+importance <- permutation_importance(best_workflow, test_data)
+
+importance |>
+  slice_max(importance, n = 15) |>                    # los 15 predictores principales
+  ggplot(aes(importance, reorder(variable, importance))) +
+  geom_col(fill = "steelblue") +
+  labs(x = "Caída del AUC de prueba al barajar", y = NULL,
+       title = paste("Figura 4. Importancia por permutación:", model_labels[best_id])) +
+  theme_minimal()
+```
+
+## Resumen del resultado principal
+
+```{r summary-numbers}
+auc_row <- test_results |>
+  filter(.metric == "roc_auc") |>
+  slice_max(.estimate, n = 1, with_ties = FALSE)
+logit_auc <- test_results |>
+  filter(.metric == "roc_auc", model == "Logistic regression")
+```
+
+La mejor discriminación en el conjunto de prueba la obtuvo
+**`r auc_row$model`** (AUC `r sprintf("%.3f", auc_row$.estimate)`, IC 95%
+`r sprintf("%.3f", auc_row$.lower)`–`r sprintf("%.3f", auc_row$.upper)`),
+frente a `r sprintf("%.3f", logit_auc$.estimate)` de la regresión logística
+sin penalizar.
+
+# Discusión ✏️
+
+*Preguntas guía. Reemplaza cada una por tu propio texto:*
+
+* **Hallazgos principales.** ¿Qué encontraste, en una o dos frases?
+* **Comparación con la literatura.** ¿Superan aquí los modelos de ML a la
+  regresión logística? ¿Es coherente con estudios previos?
+* **Calibración y utilidad clínica.** ¿Son fiables las probabilidades? ¿Con
+  qué umbrales es útil el modelo?
+* **Fortalezas.** Datos públicos, análisis preespecificado, remuestreo sin
+  fuga de datos, código completo disponible.
+* **Limitaciones.** Tamaño muestral, un solo centro, solo validación interna,
+  sin validación externa, posible sesgo de espectro, supuestos sobre los
+  datos faltantes.
+* **Implicaciones y próximos pasos.** ¿Validación externa? ¿Estudio
+  prospectivo?
+
+# Reproducibilidad
+
+```{r session-info}
+sessionInfo()
+```
+
+# Referencias ✏️
+
+1. Collins GS, et al. TRIPOD+AI statement: updated guidance for reporting
+   clinical prediction models that use regression or machine learning
+   methods. *BMJ*. 2024;385:e078378.
+2. Kuhn M, Silge J. *Tidy Modeling with R*. O'Reilly; 2022.
+   <https://www.tmwr.org>
+3. Wolberg W, et al. Breast Cancer Wisconsin (Diagnostic). UCI Machine
+   Learning Repository. <https://doi.org/10.24432/C5DW2B>

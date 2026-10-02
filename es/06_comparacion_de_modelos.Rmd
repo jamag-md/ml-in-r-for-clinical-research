@@ -1,0 +1,353 @@
+---
+title: "Lección 6 — Comparar modelos y reportarlos como un investigador"
+author: "Tu nombre"
+date: "`r Sys.Date()`"
+lang: es
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Objetivo
+
+Has entrenado cinco modelos con **los mismos datos de entrenamiento**, los has
+ajustado con **las mismas particiones de validación cruzada** y los has
+evaluado con **los mismos 76 pacientes de prueba**. Ahora los comparamos
+correctamente. Eso significa mirar más allá de "qué AUC es el más alto":
+
+1. **Discriminación**: ¿el modelo ordena a los pacientes según su riesgo?
+   (AUC, con IC 95%)
+2. **Calibración**: ¿las probabilidades predichas son *correctas*? Si el
+   modelo dice 30%, ¿tienen EAC alrededor del 30% de esos pacientes?
+3. **Utilidad clínica**: ¿usar el modelo llevaría a mejores decisiones que
+   "tratar a todos" o "no tratar a nadie"? (análisis de curvas de decisión)
+4. **Incertidumbre**: ¿las diferencias son reales o solo ruido?
+
+> Ejecuta primero las Lecciones 2–5. Guardan sus resultados en la carpeta
+> `results/`.
+
+> Los nombres de los modelos (`"Logistic regression"`, `"Random forest"`...)
+> se mantienen en inglés porque funcionan como identificadores en el código
+> de las Lecciones 2–6.
+
+# Cargar paquetes y resultados
+
+```{r packages}
+library(tidyverse)
+library(tidymodels)
+tidymodels_prefer()
+
+# list.files() busca archivos cuyo nombre coincide con un patrón; full.names da la ruta completa
+pred_files <- list.files("results", pattern = "^pred_", full.names = TRUE)
+cv_files   <- list.files("results", pattern = "^cv_",   full.names = TRUE)
+
+# map() aplica readRDS a cada archivo; list_rbind() apila los resultados en una sola tabla
+all_preds <- pred_files |> map(readRDS) |> list_rbind()
+all_cv    <- cv_files   |> map(readRDS) |> list_rbind()
+
+# Fija el orden en que aparecen los modelos en tablas y gráficos (del más simple al más complejo)
+model_order <- c("Logistic regression", "LASSO logistic", "Random forest", "XGBoost", "LightGBM")
+all_preds <- all_preds |> mutate(model = factor(model, levels = model_order))
+all_cv    <- all_cv    |> mutate(model = factor(model, levels = model_order))
+
+count(all_preds, model)   # cada modelo debe tener 76 predicciones de prueba
+```
+
+# Rendimiento en validación cruzada (datos de entrenamiento)
+
+```{r cv-table}
+all_cv |>
+  arrange(model) |>                                          # ordena las filas según model_order
+  mutate(value = sprintf("%.3f (%.3f)", mean, std_err)) |>  # formato "media (EE)"
+  select(model, .metric, value) |>
+  pivot_wider(names_from = .metric, values_from = value) |>  # una columna por métrica
+  knitr::kable(caption = "Validación cruzada de 10 particiones en el conjunto de entrenamiento: media (error estándar)")
+```
+
+# Rendimiento en el conjunto de prueba con intervalos de confianza del 95%
+
+El conjunto de prueba tiene solo 76 pacientes, así que cada estimación es
+**incierta**. Cuantificamos esa incertidumbre con el **bootstrap**:
+
+1. Extraer 76 pacientes **con reemplazo** del conjunto de prueba (algunos
+   aparecen dos veces y otros ninguna).
+2. Calcular el AUC y la puntuación de Brier de cada modelo en esa remuestra.
+3. Repetirlo 1000 veces. El 95% central de los resultados es el IC 95%.
+
+Como todos los modelos se evalúan cada vez con **los mismos** pacientes
+remuestreados (un bootstrap *pareado*), también podemos obtener un IC para la
+**diferencia** entre dos modelos.
+
+```{r bootstrap}
+set.seed(2024)
+patient_ids <- unique(all_preds$.row)   # los identificadores de los 76 pacientes de prueba
+
+# function(i) { ... } define una función pequeña. map() la ejecuta para i = 1, 2, ..., 1000.
+boot_results <- map(1:1000, function(i) {
+  resampled <- tibble(.row = sample(patient_ids, replace = TRUE))  # paso 1: remuestrear pacientes
+  resampled |>
+    left_join(all_preds, by = ".row", relationship = "many-to-many") |>  # añade las predicciones de cada modelo
+    group_by(model) |>
+    summarise(                                          # paso 2: métricas por modelo
+      auc   = roc_auc_vec(disease, .pred_Yes),
+      brier = brier_class_vec(disease, .pred_Yes),
+      .groups = "drop"
+    ) |>
+    mutate(boot = i)                                    # recuerda en qué repetición estamos
+}) |>
+  list_rbind()                                          # apila los 1000 resultados
+
+# Estimaciones puntuales en el conjunto de prueba real (no remuestreado)
+point_estimates <- all_preds |>
+  group_by(model) |>
+  summarise(auc   = roc_auc_vec(disease, .pred_Yes),
+            brier = brier_class_vec(disease, .pred_Yes),
+            sens  = sensitivity_vec(disease, .pred_class),
+            spec  = specificity_vec(disease, .pred_class))
+
+# Paso 3: IC 95% = percentiles 2,5 y 97,5 de los resultados del bootstrap
+ci <- boot_results |>
+  group_by(model) |>
+  summarise(auc_low   = quantile(auc, 0.025),   auc_high   = quantile(auc, 0.975),
+            brier_low = quantile(brier, 0.025), brier_high = quantile(brier, 0.975))
+
+test_table <- left_join(point_estimates, ci, by = "model")
+
+test_table |>
+  transmute(                                    # transmute = mutate + conservar solo las columnas nuevas
+    Modelo           = model,
+    `AUC (IC 95%)`   = sprintf("%.3f (%.3f–%.3f)", auc, auc_low, auc_high),
+    `Brier (IC 95%)` = sprintf("%.3f (%.3f–%.3f)", brier, brier_low, brier_high),
+    Sensibilidad     = sprintf("%.2f", sens),
+    Especificidad    = sprintf("%.2f", spec)
+  ) |>
+  knitr::kable(caption = "Rendimiento en el conjunto de prueba reservado (n = 76)")
+```
+
+## ¿Algún modelo es *realmente* mejor que la regresión logística?
+
+```{r paired-difference}
+boot_results |>
+  select(boot, model, auc) |>
+  pivot_wider(names_from = model, values_from = auc) |>   # una columna por modelo
+  mutate(across(                                           # para cada columna de modelo...
+    -c(boot, `Logistic regression`),
+    ~ .x - `Logistic regression`                           # ...resta el AUC de la regresión logística
+  )) |>
+  select(-boot, -`Logistic regression`) |>
+  pivot_longer(everything(), names_to = "model", values_to = "auc_difference") |>
+  group_by(model) |>
+  summarise(
+    difference = median(auc_difference),
+    ci_low     = quantile(auc_difference, 0.025),
+    ci_high    = quantile(auc_difference, 0.975)
+  ) |>
+  knitr::kable(digits = 3, caption = "Diferencia de AUC frente a la regresión logística (bootstrap pareado)")
+```
+
+**Cómo leerlo:** si el IC 95% de la diferencia incluye el 0, el conjunto de
+prueba no aporta evidencia de que el modelo de ML discrimine mejor que la
+regresión logística. Con muestras pequeñas como esta, es el resultado
+habitual, y coincide con una revisión sistemática conocida: en promedio, el
+ML no superó a la regresión logística en la predicción clínica
+(Christodoulou et al., *J Clin Epidemiol* 2019).
+
+# Curvas ROC
+
+```{r roc-all, fig.height=5, fig.width=6}
+all_preds |>
+  group_by(model) |>                       # una curva por modelo
+  roc_curve(truth = disease, .pred_Yes) |>
+  autoplot() +
+  labs(title = "Curvas ROC en el conjunto de prueba")
+```
+
+# Calibración: ¿son correctas las probabilidades?
+
+Un modelo puede ordenar bien a los pacientes (AUC alto) y aun así dar
+**probabilidades equivocadas**, por ejemplo predecir 80% en pacientes cuyo
+riesgo real es del 50%. Los clínicos actúan según probabilidades, así que la
+calibración importa.
+
+**Gráfico de calibración:** se agrupa a los pacientes según su riesgo
+predicho y se compara, en cada grupo, el riesgo **predicho promedio** con la
+proporción **observada** con EAC. Un modelo perfecto queda sobre la
+diagonal.
+
+```{r calibration-plot, fig.height=6, fig.width=9}
+calibration_data <- all_preds |>
+  group_by(model) |>
+  mutate(risk_group = ntile(.pred_Yes, 5)) |>   # 5 grupos de ~15 pacientes, del riesgo predicho más bajo al más alto
+  group_by(model, risk_group) |>
+  summarise(
+    predicted = mean(.pred_Yes),                # probabilidad predicha promedio del grupo
+    observed  = mean(disease == "Yes"),         # proporción real con EAC en el grupo
+    n         = n(),
+    .groups = "drop"
+  )
+
+ggplot(calibration_data, aes(x = predicted, y = observed)) +
+  geom_abline(linetype = "dashed", colour = "grey50") +   # la línea de calibración perfecta
+  geom_line(colour = "steelblue") +
+  geom_point(colour = "steelblue", size = 2) +
+  facet_wrap(~ model) +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +           # la misma escala en ambos ejes
+  labs(x = "Probabilidad predicha", y = "Proporción observada con EAC",
+       title = "Calibración en el conjunto de prueba (5 grupos de riesgo)") +
+  theme_minimal()
+```
+
+## Intercepto y pendiente de calibración
+
+* La **pendiente de calibración** ideal es 1. **< 1** significa
+  predicciones demasiado extremas (típico del sobreajuste). **> 1**
+  significa predicciones demasiado moderadas.
+* El **intercepto de calibración** (calibración global) ideal es 0. Indica
+  si los riesgos son sistemáticamente demasiado altos o demasiado bajos.
+
+```{r calibration-stats}
+calibration_stats <- function(truth, prob) {
+  y  <- as.integer(truth == "Yes")                       # 1 = EAC, 0 = sin EAC
+  lp <- qlogis(pmin(pmax(prob, 0.001), 0.999))           # probabilidad a log-odds (evita 0 y 1)
+  slope     <- coef(glm(y ~ lp, family = binomial))[2]   # regresión logística del desenlace sobre los log-odds
+  intercept <- coef(glm(y ~ offset(lp), family = binomial))[1]  # intercepto con la pendiente fijada en 1
+  tibble(cal_intercept = intercept, cal_slope = slope)
+}
+
+all_preds |>
+  group_by(model) |>
+  summarise(calibration_stats(disease, .pred_Yes)) |>
+  knitr::kable(digits = 2, caption = "Intercepto de calibración (ideal 0) y pendiente (ideal 1)")
+```
+
+# Utilidad clínica: análisis de curvas de decisión (DCA)
+
+Supongamos que derivamos a un paciente a angiografía si su riesgo predicho
+supera un **umbral** `t`. Elegir `t` refleja cuánto pesa un caso no detectado
+frente a una angiografía innecesaria. El **beneficio neto** (Vickers y Elkin,
+2006) cuenta los verdaderos positivos y resta los falsos positivos,
+ponderados por ese umbral:
+
+`beneficio neto = VP/n − FP/n × t / (1 − t)`
+
+Un modelo es útil con un umbral si su beneficio neto supera las dos
+estrategias de referencia: **"derivar a todos"** y **"no derivar a nadie"**
+(beneficio neto = 0).
+
+```{r dca, fig.height=5, fig.width=8}
+thresholds <- tibble(threshold = seq(0.05, 0.80, by = 0.01))
+prevalence <- mean(all_preds$disease[all_preds$model == "Logistic regression"] == "Yes")
+
+dca <- all_preds |>
+  cross_join(thresholds) |>                 # cada predicción emparejada con cada umbral
+  group_by(model, threshold) |>
+  summarise(
+    tp_rate = sum(.pred_Yes >= threshold & disease == "Yes") / n(),  # verdaderos positivos / n
+    fp_rate = sum(.pred_Yes >= threshold & disease == "No")  / n(),  # falsos positivos / n
+    .groups = "drop"
+  ) |>
+  mutate(
+    net_benefit = tp_rate - fp_rate * threshold / (1 - threshold),   # la fórmula del beneficio neto
+    model = as.character(model)
+  )
+
+treat_all <- thresholds |>
+  mutate(model = "Derivar a todos",
+         net_benefit = prevalence - (1 - prevalence) * threshold / (1 - threshold))
+
+bind_rows(dca, treat_all) |>
+  ggplot(aes(x = threshold, y = net_benefit, colour = model)) +
+  geom_line(linewidth = 0.8) +
+  geom_hline(yintercept = 0, colour = "black") +           # "no derivar a nadie"
+  coord_cartesian(ylim = c(-0.05, prevalence + 0.05)) +    # enfoca el rango útil
+  labs(x = "Umbral de riesgo para derivar", y = "Beneficio neto", colour = NULL,
+       title = "Análisis de curvas de decisión (conjunto de prueba)") +
+  theme_minimal()
+```
+
+# Elegir un modelo final
+
+No hay una respuesta automática. Ten en cuenta:
+
+* El **rendimiento**, *incluida su incertidumbre*. Si los IC se solapan, no
+  hay "diferencia demostrada".
+* La **calibración**: un modelo más simple y bien calibrado suele ser mejor
+  que uno más fino pero mal calibrado.
+* La **interpretabilidad y la implementación**: la regresión logística puede
+  escribirse como una puntuación en papel. Un modelo de boosting necesita
+  software.
+* La **parsimonia**: si el rendimiento es similar, prefiere el modelo más
+  simple.
+
+Fíjate también en que los AUC de validación cruzada (alrededor de 0,91–0,93)
+son más altos que los AUC de prueba. Con 76 pacientes de prueba, la
+estimación es ruidosa, y además elegimos los mejores hiperparámetros *según*
+esos resultados de validación cruzada (un pequeño sesgo optimista). Esta es
+una de las razones por las que la **validación externa** en otro hospital o
+en otro periodo es el estándar de referencia.
+
+# Reportar: escribir los resultados directamente desde el código
+
+R Markdown puede poner números calculados por tu código **dentro del texto**
+con código en línea: una comilla invertida, la letra r, un espacio, tu código
+y otra comilla invertida. Los números se actualizan automáticamente si cambian
+los datos, así que no hay errores al copiar y pegar.
+
+```{r best-model}
+best <- test_table |> slice_max(auc, n = 1)   # la fila con el AUC de prueba más alto
+```
+
+> **Ejemplo de frase de resultados (generada desde el código):** en el
+> conjunto de prueba reservado
+> (n = `r nrow(filter(all_preds, model == "Logistic regression"))`), el AUC
+> más alto lo obtuvo `r best$model` (`r sprintf("%.2f", best$auc)`;
+> IC 95% `r sprintf("%.2f", best$auc_low)`–`r sprintf("%.2f", best$auc_high)`).
+> La regresión logística alcanzó un AUC de
+> `r sprintf("%.2f", test_table$auc[test_table$model == "Logistic regression"])`.
+
+## Lista de comprobación para el reporte: TRIPOD+AI
+
+Para artículos sobre modelos de predicción, sigue **TRIPOD+AI** (Collins et
+al., *BMJ* 2024; <https://www.tripod-statement.org>). Los puntos clave y
+dónde están en este curso:
+
+| Punto de TRIPOD+AI | Dónde está en el curso |
+|---|---|
+| Fuente de datos, criterios de elegibilidad, fechas | Lección 1, *Intención del proyecto* |
+| Definición del desenlace | Lección 1, *Limpiar los datos* |
+| Predictores y cómo se trataron | Diccionario de datos de la Lección 1, recetas |
+| Manejo de los datos faltantes | Recetas (imputación dentro del remuestreo) |
+| Tamaño muestral / número de eventos | Equilibrio del desenlace (Lección 1), precaución de la Lección 2 |
+| Tipo de modelo, ajuste de hiperparámetros | Lecciones 2–5 (cuadrículas, validación cruzada de 10 particiones) |
+| Rendimiento: discriminación **y** calibración | Esta lección |
+| Utilidad clínica | Análisis de curvas de decisión (esta lección) |
+| Incertidumbre (IC) | Bootstrap (esta lección) |
+| Disponibilidad del código y del software | `sessionInfo()` más abajo + compartir tu `.Rmd` |
+
+# Información de reproducibilidad
+
+```{r session-info}
+sessionInfo()   # muestra la versión de R y de los paquetes. Inclúyelo siempre en investigación
+```
+
+# Ideas clave
+
+* Compara los modelos con **los mismos pacientes** y con **IC**, no solo con
+  estimaciones puntuales.
+* Reporta **discriminación, calibración y utilidad clínica**.
+* Con conjuntos de datos tabulares pequeños, el ML complejo a menudo **no
+  supera** a la regresión logística. Repórtalo con honestidad.
+* Usa código en línea para que el texto y los resultados nunca discrepen.
+
+# Siguiente
+
+Abre **`07_PLANTILLA_proyecto_de_investigacion.Rmd`**, una plantilla completa
+y reutilizable que aplica todo a un conjunto de datos público **nuevo**.
+Cópiala para tus propios estudios.
