@@ -1,0 +1,19 @@
+# RStudio private session files (contain local paths and usernames)
+.Rproj.user/
+.Rhistory
+.RData
+.Ruserdata
+
+# Files created when you run the lessons (data are downloaded by the code)
+data/
+results/
+
+# Knitted reports and their figure folders
+*.html
+*_files/
+*_cache/
+
+# Operating-system clutter
+.DS_Store
+Thumbs.db
+desktop.ini
