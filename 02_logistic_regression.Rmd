@@ -1,0 +1,420 @@
+---
+title: "Lesson 2 — Logistic regression (classical and machine-learning style)"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# The concept
+
+## What problem does it solve?
+
+**Logistic regression** predicts the **probability** of a yes/no outcome
+(here: coronary artery disease, CAD) from several predictors. It is the
+standard method in clinical research and the **baseline every ML model must
+beat**.
+
+## How it works (no maths needed)
+
+1. It adds up the predictors, each multiplied by a weight (a *coefficient*):
+   `score = b0 + b1*age + b2*male + ...`
+2. The score can be any number, so it is squeezed between 0 and 1 by an
+   S-shaped curve (the *logistic* or *sigmoid* function). The result is a
+   probability.
+3. The weights are chosen so the predicted probabilities fit the observed
+   outcomes as closely as possible (*maximum likelihood*).
+
+**Odds ratio (OR)** = `exp(coefficient)`. An OR of 2 for "male" means men have
+twice the *odds* of CAD as women, **holding the other variables constant**.
+
+## Two different questions: *explain* vs *predict*
+
+| | **Explanatory (classical statistics)** | **Predictive (machine learning)** |
+|---|---|---|
+| Question | *Which factors are associated with CAD, and how strongly?* | *How accurately can we predict CAD in **new** patients?* |
+| Main output | Odds ratios, 95% CI, p-values | AUC, calibration, sensitivity... on unseen data |
+| Data use | Usually all data | Train/test split + cross-validation |
+
+Researchers often mix these up. This lesson shows both, so you can see the
+difference.
+
+# Load the packages and the data
+
+```{r packages}
+library(tidyverse)
+library(tidymodels)
+library(gtsummary)
+
+tidymodels_prefer()   # if two packages have a function with the same name, use the tidymodels one
+
+heart       <- readRDS("data/heart_clean.rds")   # clean data made in Lesson 1
+heart_split <- readRDS("data/heart_split.rds")   # the same train/test split as Lesson 1
+heart_train <- training(heart_split)
+heart_test  <- testing(heart_split)
+
+dir.create("results", showWarnings = FALSE)       # folder to store results for Lesson 6
+```
+
+> If you get `cannot open file 'data/heart_clean.rds'`, you have not run
+> Lesson 1 yet, or you did not open the course with the `.Rproj` file.
+
+# Part A: classical (explanatory) logistic regression
+
+`glm()` stands for *generalized linear model*. `family = binomial` tells it
+to do logistic regression.
+
+`glm()` models the probability of the **second** factor level. Our outcome
+has `"Yes"` first, so to avoid confusion we make a 0/1 version where 1 = CAD.
+
+```{r glm-fit}
+heart_glm_data <- heart |>
+  mutate(disease_01 = if_else(disease == "Yes", 1, 0)) |>  # 1 = CAD, 0 = no CAD
+  select(-disease)                                          # drop the factor version
+
+glm_fit <- glm(
+  disease_01 ~ .,           # formula: outcome ~ predictors. The dot means "all other columns"
+  data = heart_glm_data,
+  family = binomial         # logistic regression
+)
+
+# glm() silently drops the 6 patients with a missing value (a "complete-case analysis").
+nobs(glm_fit)   # number of patients actually used
+```
+
+## Odds-ratio table (publication-ready)
+
+```{r glm-table}
+tbl_regression(
+  glm_fit,
+  exponentiate = TRUE   # show odds ratios (exp of the coefficients) instead of log-odds
+) |>
+  bold_p() |>           # bold the p-values below 0.05
+  bold_labels()
+```
+
+**How to read one row:** for `sex = Male`, an OR above 1 with a 95% CI that
+does not include 1 means that men had higher odds of CAD than women **after
+adjusting for every other variable in the model**.
+
+> **Caution:** these are *associations*, not causes. Also, with 297 patients,
+> 139 events and 17 coefficients, the model is close to the limit of what the
+> data can support. A common rule of thumb asks for at least 10–20 events per
+> coefficient. For proper sample-size methods see Riley et al., *BMJ* 2020.
+
+# Part B: logistic regression as a *predictive* model (tidymodels)
+
+Now the question is: **how well does it predict new patients?** We use the
+**tidymodels** framework. You will reuse exactly the same 5 steps for random
+forest, XGBoost and LightGBM:
+
+1. **Recipe**: how to prepare the predictors.
+2. **Model specification**: which algorithm.
+3. **Workflow**: recipe + model glued together.
+4. **Resampling (cross-validation)**: estimate performance using only the training data.
+5. **Final fit**: train on all training data, then evaluate **once** on the test set.
+
+## Step 1: the recipe (preprocessing)
+
+A recipe lists preparation steps. The crucial point: each step **learns from
+the training data only** (for example the median used to fill missing values)
+and then *applies* the same thing to new data. Doing preprocessing on the full
+dataset before splitting leaks test information into training. That is called
+**data leakage**, and it makes results look too good.
+
+```{r recipe}
+heart_recipe <- recipe(disease ~ ., data = heart_train) |>   # outcome ~ all predictors
+  step_impute_median(all_numeric_predictors()) |>  # fill missing numbers with the training median
+  step_impute_mode(all_nominal_predictors()) |>    # fill missing categories with the most common one
+  step_dummy(all_nominal_predictors()) |>          # turn categories into 0/1 columns ("dummy variables")
+  step_zv(all_predictors()) |>                     # remove columns with zero variance (all the same value)
+  step_normalize(all_numeric_predictors())         # rescale numbers to mean 0, SD 1 (needed for LASSO later)
+
+heart_recipe
+```
+
+Want to see what the recipe produces? `prep()` learns the steps from the
+training data and `bake()` applies them:
+
+```{r recipe-peek}
+heart_recipe |>
+  prep() |>                 # learn medians, modes, means, SDs from the training data
+  bake(new_data = NULL) |>  # apply to the training data itself (NULL = the data it learned from)
+  head()                    # first 6 rows: note the new dummy columns like sex_Male
+```
+
+## Step 2: the model specification
+
+```{r model-spec}
+logistic_spec <- logistic_reg() |>   # the type of model
+  set_engine("glm") |>               # which R function does the computing (glm)
+  set_mode("classification")         # predicting a category, not a number
+
+logistic_spec
+```
+
+## Step 3: the workflow
+
+```{r workflow}
+logistic_wf <- workflow() |>
+  add_recipe(heart_recipe) |>    # the preprocessing
+  add_model(logistic_spec)       # the model
+
+logistic_wf
+```
+
+## Step 4: cross-validation (CV)
+
+### Concept
+
+Using the test set to compare or tune models would "use it up". Instead,
+**10-fold cross-validation** splits the *training* data into 10 parts
+(*folds*). The model is trained on 9 folds and evaluated on the remaining
+fold. This repeats 10 times, so every fold is used once for evaluation. The
+**average** of the 10 results estimates performance on new data.
+
+```
+Fold:   1    2    3    4    5    6    7    8    9    10
+Run 1: [TEST][train..................................]
+Run 2: [train][TEST][train...........................]
+...
+Run 10:[train..................................][TEST]
+```
+
+### Which performance measures?
+
+| Metric | Meaning | Good value |
+|--------|---------|------------|
+| **ROC AUC** (C-statistic) | Discrimination: chance the model gives a random CAD patient a higher probability than a random non-CAD patient | 0.5 = coin flip, 1 = perfect |
+| **Brier score** | Average squared error of the predicted probabilities (accuracy *and* calibration) | 0 = perfect. Lower is better |
+| **Accuracy** | % correctly classified at a 0.5 threshold | Misleading if the outcome is rare |
+| **Sensitivity** | % of CAD patients correctly flagged | Higher is better |
+| **Specificity** | % of non-CAD patients correctly cleared | Higher is better |
+
+```{r cv}
+set.seed(2024)   # same seed in every lesson, so every model is tested on identical folds
+heart_folds <- vfold_cv(heart_train, v = 10, strata = disease)
+
+# The set of metrics we will compute. We reuse this in every lesson.
+heart_metrics <- metric_set(roc_auc, brier_class, accuracy, sensitivity, specificity)
+
+logistic_cv <- fit_resamples(
+  logistic_wf,                                  # what to fit
+  resamples = heart_folds,                      # where to fit it (the 10 folds)
+  metrics   = heart_metrics,                    # what to measure
+  control   = control_resamples(save_pred = TRUE)  # keep the predictions (to plot later)
+)
+
+collect_metrics(logistic_cv)   # mean = average across the 10 folds; std_err = its uncertainty
+```
+
+## Step 5: final fit and the one-time test-set evaluation
+
+`last_fit()` trains the workflow on **all** training data and evaluates it on
+the **test set**. This is the number you report as "performance on held-out
+data".
+
+```{r last-fit}
+logistic_final <- last_fit(
+  logistic_wf,
+  split   = heart_split,    # the original split: it knows which patients are train and test
+  metrics = heart_metrics
+)
+
+collect_metrics(logistic_final)   # performance on the 76 test patients
+```
+
+### Predictions for each test patient
+
+```{r predictions}
+logistic_preds <- collect_predictions(logistic_final)
+
+logistic_preds |>
+  select(disease, .pred_Yes, .pred_class) |>  # truth, predicted probability, predicted class
+  head(10)
+```
+
+`.pred_Yes` is the predicted probability of CAD. `.pred_class` is "Yes" when
+that probability is 0.5 or higher.
+
+### Confusion matrix
+
+```{r confusion, fig.height=3, fig.width=4}
+logistic_preds |>
+  conf_mat(truth = disease, estimate = .pred_class) |>  # cross-table of truth vs prediction
+  autoplot(type = "heatmap")
+```
+
+### ROC curve
+
+The ROC curve shows sensitivity vs (1 − specificity) at **every** possible
+threshold. The closer it hugs the top-left corner, the better.
+
+```{r roc, fig.height=4, fig.width=4}
+logistic_preds |>
+  roc_curve(truth = disease, .pred_Yes) |>   # compute sensitivity/specificity at all thresholds
+  autoplot()
+```
+
+### The threshold is a clinical choice
+
+0.5 is not sacred. For a screening test you may want **higher sensitivity**,
+accepting more false positives. Look what happens at a threshold of 0.3:
+
+```{r threshold}
+logistic_preds |>
+  mutate(
+    # new predicted class: "Yes" if probability >= 0.3
+    pred_class_30 = factor(if_else(.pred_Yes >= 0.3, "Yes", "No"), levels = c("Yes", "No"))
+  ) |>
+  summarise(
+    sens_at_0.5 = sensitivity_vec(disease, .pred_class),
+    spec_at_0.5 = specificity_vec(disease, .pred_class),
+    sens_at_0.3 = sensitivity_vec(disease, pred_class_30),
+    spec_at_0.3 = specificity_vec(disease, pred_class_30)
+  )
+```
+
+# Part C: penalized logistic regression (LASSO) and your first *tuning*
+
+**LASSO** is logistic regression with a **penalty** that shrinks weak
+coefficients toward zero, and some of them to *exactly* zero. Benefits:
+
+* It reduces **overfitting** when there are many predictors relative to events.
+* It does **variable selection** automatically.
+
+The strength of the penalty (`penalty`, also called lambda) is a
+**hyperparameter**: a setting **you** choose, not something learned from the
+data directly. We find a good value by **tuning**: try many values and keep
+the one with the best cross-validated AUC.
+
+```{r lasso-spec}
+lasso_spec <- logistic_reg(
+  penalty = tune(),   # tune() = "find the best value by cross-validation"
+  mixture = 1         # 1 = LASSO, 0 = ridge, between 0 and 1 = elastic net
+) |>
+  set_engine("glmnet")
+
+lasso_wf <- workflow() |>
+  add_recipe(heart_recipe) |>   # same recipe (normalizing matters here: the penalty is scale-sensitive)
+  add_model(lasso_spec)
+
+# 30 penalty values from 10^-4 (almost no penalty) to 10^0 = 1 (very strong penalty)
+lasso_grid <- grid_regular(penalty(range = c(-4, 0)), levels = 30)
+
+lasso_tune <- tune_grid(
+  lasso_wf,
+  resamples = heart_folds,   # same folds as before
+  grid      = lasso_grid,    # the candidate values to try
+  metrics   = heart_metrics
+)
+```
+
+```{r lasso-plot, fig.height=4, fig.width=8}
+autoplot(lasso_tune)   # performance (y) for each penalty value (x)
+```
+
+Too little penalty overfits. Too much penalty removes useful predictors and
+performance drops.
+
+```{r lasso-best}
+show_best(lasso_tune, metric = "roc_auc", n = 5)    # the 5 best penalty values
+
+best_penalty <- select_best(lasso_tune, metric = "roc_auc")  # the single best one
+best_penalty
+```
+
+> Many penalty values give almost the same AUC. If you prefer a **simpler**
+> model with fewer variables, use
+> `select_by_one_std_err(lasso_tune, desc(penalty), metric = "roc_auc")`.
+> It picks the strongest penalty whose AUC is within one standard error of the
+> best (the "1-SE rule").
+
+## Final LASSO model
+
+```{r lasso-final}
+lasso_final_wf <- finalize_workflow(lasso_wf, best_penalty)  # put the best value into the workflow
+
+lasso_final <- last_fit(lasso_final_wf, split = heart_split, metrics = heart_metrics)
+
+collect_metrics(lasso_final)
+```
+
+## Which variables did LASSO keep?
+
+Note: glmnet models the probability of the **second** outcome level ("No"),
+so its coefficients point the wrong way. We flip the sign so that **positive
+means higher risk of CAD**.
+
+```{r lasso-coefs, fig.height=5, fig.width=7}
+lasso_coefs <- lasso_final |>
+  extract_fit_parsnip() |>                # get the fitted model out of the results
+  tidy() |>                               # turn coefficients into a table
+  filter(term != "(Intercept)") |>        # drop the intercept
+  mutate(effect_on_CAD = -estimate)       # flip the sign: positive = higher CAD risk
+
+lasso_coefs |> arrange(desc(abs(effect_on_CAD)))   # biggest effects first
+
+ggplot(lasso_coefs, aes(x = effect_on_CAD, y = reorder(term, effect_on_CAD))) +
+  geom_col() +
+  labs(x = "Standardized coefficient (positive = higher CAD risk)", y = NULL,
+       title = "LASSO coefficients (zero = variable removed)") +
+  theme_minimal()
+```
+
+# Save results for the model comparison (Lesson 6)
+
+```{r save}
+# Test-set predictions, labelled with the model name
+bind_rows(
+  collect_predictions(logistic_final) |> mutate(model = "Logistic regression"),
+  collect_predictions(lasso_final)    |> mutate(model = "LASSO logistic")
+) |>
+  select(model, .row, disease, .pred_Yes, .pred_class) |>  # .row = patient ID
+  saveRDS("results/pred_logistic.rds")
+
+# Cross-validation results (for the best LASSO penalty only)
+bind_rows(
+  collect_metrics(logistic_cv) |> mutate(model = "Logistic regression"),
+  collect_metrics(lasso_tune) |>
+    filter(.config == best_penalty$.config) |>   # keep only the chosen penalty
+    mutate(model = "LASSO logistic")
+) |>
+  select(model, .metric, mean, std_err) |>
+  saveRDS("results/cv_logistic.rds")
+```
+
+# Key takeaways
+
+* **Explanatory** models give odds ratios. **Predictive** models are judged on
+  **unseen data**.
+* The 5-step tidymodels pattern (**recipe → model → workflow → CV → last fit**)
+  is the same for every algorithm.
+* Do all preprocessing **inside the recipe** to avoid data leakage.
+* **Hyperparameters** (like the LASSO penalty) are tuned with
+  **cross-validation**, never on the test set.
+
+# Check your understanding
+
+1. What is the difference between the OR table in Part A and the AUC in Part B?
+2. Why is the test set used only once?
+3. What does the LASSO penalty do to a weak predictor?
+
+# Try it yourself
+
+1. Change `mixture = 1` to `mixture = 0.5` (elastic net) and rerun Part C.
+   Are more variables kept?
+2. Try a threshold of 0.7 in the threshold chunk. What happens to
+   sensitivity and specificity?
+
+# Next
+
+Open **`03_random_forest.Rmd`**.

@@ -1,0 +1,307 @@
+---
+title: "Lesson 4 — Gradient boosting with XGBoost"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# The concept
+
+## Boosting vs random forest
+
+* **Random forest:** many **deep, independent** trees grown **in parallel**,
+  then averaged.
+* **Boosting:** many **small** trees grown **one after another**. Each new
+  tree focuses on the errors the previous trees still make.
+
+Analogy: a team of students correcting an essay. Student 1 writes a rough
+draft. Student 2 fixes only what's still wrong. Student 3 fixes what's still
+wrong after that, and so on. Each correction is small, but together they
+produce a very good essay.
+
+**"Gradient"** boosting means each tree is fitted to the *gradient* of the
+loss: in plain words, to the direction in which the current predictions are
+most wrong.
+
+**XGBoost** ("eXtreme Gradient Boosting"; Chen & Guestrin, 2016) is a fast,
+regularized implementation that has won many prediction competitions on
+tabular data.
+
+## The hyperparameters that matter
+
+| Hyperparameter (tidymodels name) | XGBoost name | Meaning | Typical range |
+|---|---|---|---|
+| `trees` | `nrounds` | Number of trees added in sequence | 100–2000 |
+| `learn_rate` | `eta` | How much each tree's correction counts. Small = slow but careful | 0.001–0.3 |
+| `tree_depth` | `max_depth` | Size of each tree. Small = simple interactions | 1–6 |
+| `min_n` | `min_child_weight` | Minimum data in a leaf. Larger = more conservative | 1–30 |
+| `sample_size` | `subsample` | Share of patients used for each tree (adds randomness) | 0.5–1 |
+
+**Trade-off:** a small `learn_rate` needs many `trees`. Boosting **can
+overfit** if it runs too long with too high a learning rate, which is why we
+tune these together with cross-validation.
+
+# Load packages and data
+
+```{r packages}
+library(tidyverse)
+library(tidymodels)
+tidymodels_prefer()
+
+heart_split <- readRDS("data/heart_split.rds")
+heart_train <- training(heart_split)
+heart_test  <- testing(heart_split)
+
+set.seed(2024)
+heart_folds <- vfold_cv(heart_train, v = 10, strata = disease)
+
+heart_metrics <- metric_set(roc_auc, brier_class, accuracy, sensitivity, specificity)
+```
+
+# The recipe: XGBoost needs numbers only
+
+XGBoost only accepts numbers, so categories must become **dummy (0/1)
+columns**. It **handles missing numeric values by itself**: at every split it
+learns which direction missing values should go. So we only fill in missing
+*categories* (before making dummies) and leave missing numbers as they are.
+
+```{r recipe}
+xgb_recipe <- recipe(disease ~ ., data = heart_train) |>
+  step_impute_mode(all_nominal_predictors()) |>   # fill missing categories (e.g. thal)
+  step_dummy(all_nominal_predictors())            # categories to 0/1 columns. No scaling needed for trees
+```
+
+# Model specification with tuning
+
+```{r xgb-spec}
+xgb_spec <- boost_tree(
+  trees       = tune(),
+  tree_depth  = tune(),
+  learn_rate  = tune(),
+  min_n       = tune(),
+  sample_size = 0.8        # fixed: each tree sees a random 80% of patients
+) |>
+  set_engine("xgboost") |>
+  set_mode("classification")
+
+xgb_wf <- workflow() |>
+  add_recipe(xgb_recipe) |>
+  add_model(xgb_spec)
+```
+
+## Set sensible search ranges
+
+The default ranges are very wide, so we narrow them to values that make sense
+for small tabular data.
+
+```{r xgb-params}
+xgb_params <- xgb_wf |>
+  extract_parameter_set_dials() |>             # the list of parameters marked tune()
+  update(                                      # change their search ranges:
+    trees      = trees(range = c(100, 1000)),
+    tree_depth = tree_depth(range = c(1, 6)),
+    learn_rate = learn_rate(range = c(-3, -0.5)),  # on log10 scale: 0.001 to 0.32
+    min_n      = min_n(range = c(2, 30))
+  )
+
+xgb_params
+```
+
+## Space-filling grid
+
+With 4 hyperparameters, a regular grid of 5 values each would be
+5^4 = 625 combinations. That is too many. A **space-filling grid** spreads a
+smaller number of combinations (here 30) evenly across the whole search space.
+
+```{r xgb-tune}
+set.seed(2024)
+xgb_grid <- grid_space_filling(xgb_params, size = 30)
+
+head(xgb_grid)   # the first few combinations
+
+xgb_tune <- tune_grid(
+  xgb_wf,
+  resamples = heart_folds,
+  grid      = xgb_grid,
+  metrics   = heart_metrics
+)
+```
+
+```{r xgb-tune-plot, fig.height=6, fig.width=10}
+autoplot(xgb_tune, metric = "roc_auc")   # AUC against each hyperparameter
+```
+
+```{r xgb-best}
+show_best(xgb_tune, metric = "roc_auc", n = 5)
+best_xgb <- select_best(xgb_tune, metric = "roc_auc")
+best_xgb
+```
+
+# Final model and test-set evaluation
+
+```{r xgb-final}
+xgb_final_wf <- finalize_workflow(xgb_wf, best_xgb)
+
+xgb_final <- last_fit(xgb_final_wf, split = heart_split, metrics = heart_metrics)
+
+collect_metrics(xgb_final)
+```
+
+```{r xgb-roc, fig.height=4, fig.width=4}
+collect_predictions(xgb_final) |>
+  roc_curve(truth = disease, .pred_Yes) |>
+  autoplot()
+```
+
+# Explaining the model
+
+## Built-in importance (gain)
+
+**Gain** = how much a variable improved the predictions, summed over all the
+splits that used it.
+
+```{r xgb-importance, fig.height=5, fig.width=7}
+xgb_booster <- extract_fit_engine(xgb_final)    # the raw XGBoost model
+
+xgb_importance <- xgboost::xgb.importance(model = xgb_booster)  # package::function() calls a function without library()
+
+ggplot(xgb_importance, aes(x = Gain, y = reorder(Feature, Gain))) +
+  geom_col(fill = "steelblue") +
+  labs(x = "Importance (gain)", y = NULL, title = "XGBoost variable importance") +
+  theme_minimal()
+```
+
+## SHAP values: importance **with direction**, for every patient
+
+**SHAP values** (SHapley Additive exPlanations; Lundberg & Lee, 2017) split
+each patient's prediction into contributions from each variable:
+
+`prediction (log-odds) = baseline + SHAP(age) + SHAP(sex) + ... + SHAP(thal)`
+
+* **Positive SHAP:** that variable pushed **this patient's** risk **up**.
+* **Negative SHAP:** it pushed the risk **down**.
+
+They are widely used in ML papers to open up the "black box". XGBoost
+computes them exactly for tree models.
+
+```{r shap-compute}
+# 1. Apply the trained recipe to the test patients, to get the exact columns XGBoost saw
+xgb_fitted_wf <- extract_workflow(xgb_final)           # the trained workflow
+test_x <- xgb_fitted_wf |>
+  extract_recipe() |>                                  # its trained recipe
+  bake(new_data = heart_test, all_predictors())        # apply it; keep predictors only
+
+# 2. Ask XGBoost for SHAP contributions (predcontrib = TRUE)
+shap_matrix <- predict(xgb_booster, newdata = as.matrix(test_x), predcontrib = TRUE)
+
+# 3. Put them in a long table: one row per patient × variable
+shap_long <- as_tibble(shap_matrix) |>
+  select(-`(Intercept)`) |>                      # drop the baseline column
+  mutate(patient = row_number()) |>
+  pivot_longer(-patient, names_to = "variable", values_to = "shap") |>
+  left_join(                                     # add each patient's actual value of the variable
+    test_x |>
+      mutate(patient = row_number()) |>
+      pivot_longer(-patient, names_to = "variable", values_to = "value"),
+    by = c("patient", "variable")
+  ) |>
+  group_by(variable) |>
+  mutate(value_scaled = percent_rank(value)) |>  # 0 = lowest value, 1 = highest (for colouring)
+  ungroup()
+
+head(shap_long)
+```
+
+### SHAP summary ("beeswarm") plot
+
+Each dot is one patient. **Position** shows how much the variable pushed that
+patient's risk up (right) or down (left). **Colour** shows whether the
+patient's value was high (red) or low (blue).
+
+```{r shap-beeswarm, fig.height=6, fig.width=8}
+shap_order <- shap_long |>
+  group_by(variable) |>
+  summarise(mean_abs = mean(abs(shap))) |>       # average size of the effect
+  arrange(mean_abs) |>
+  pull(variable)                                 # variable names, least to most important
+
+ggplot(shap_long, aes(x = shap, y = factor(variable, levels = shap_order), colour = value_scaled)) +
+  geom_vline(xintercept = 0, colour = "grey60") +
+  geom_jitter(height = 0.2, width = 0, alpha = 0.8) +   # spread dots vertically so they don't overlap
+  scale_colour_gradient(low = "blue", high = "red", name = "Variable value\n(low → high)") +
+  labs(x = "SHAP value (contribution to log-odds of CAD)", y = NULL,
+       title = "SHAP summary plot, test patients") +
+  theme_minimal()
+```
+
+**Example reading:** for `n_vessels`, red dots (more diseased vessels) sit on
+the right, so more vessels push the predicted risk of CAD up. That matches
+clinical knowledge, a good sanity check.
+
+### SHAP dependence plot for one variable
+
+```{r shap-dependence, fig.height=4, fig.width=6}
+shap_long |>
+  filter(variable == "max_hr") |>
+  ggplot(aes(x = value, y = shap)) +
+  geom_point() +
+  geom_smooth(se = FALSE, method = "loess") +   # trend line
+  geom_hline(yintercept = 0, linetype = "dashed") +
+  labs(x = "Maximum heart rate (bpm)", y = "SHAP value",
+       title = "How max heart rate changes the predicted risk") +
+  theme_minimal()
+```
+
+This shows the **shape** of the relationship, which may be non-linear,
+something plain logistic regression assumes away.
+
+# Save results for Lesson 6
+
+```{r save}
+collect_predictions(xgb_final) |>
+  mutate(model = "XGBoost") |>
+  select(model, .row, disease, .pred_Yes, .pred_class) |>  # .row = patient ID
+  saveRDS("results/pred_xgb.rds")
+
+collect_metrics(xgb_tune) |>
+  filter(.config == best_xgb$.config) |>
+  mutate(model = "XGBoost") |>
+  select(model, .metric, mean, std_err) |>
+  saveRDS("results/cv_xgb.rds")
+```
+
+# Key takeaways
+
+* Boosting builds **small trees in sequence**, each correcting the previous
+  errors.
+* The most important hyperparameters are `learn_rate`, `trees` and
+  `tree_depth`. Tune them **together**.
+* XGBoost needs numeric input (dummies) but handles missing numbers natively.
+* **SHAP values** give per-patient, direction-aware explanations.
+* On small datasets like this one, boosting often does **not** beat
+  logistic regression. That is a real finding, not a failure.
+
+# Check your understanding
+
+1. What is the key difference between how a random forest and boosting build
+   their trees?
+2. Why does a smaller learning rate need more trees?
+3. What does a positive SHAP value mean for a patient?
+
+# Try it yourself
+
+1. Change `size = 30` to `size = 10` in the grid. Does the best AUC change?
+2. Make a SHAP dependence plot for `age` instead of `max_hr`.
+
+# Next
+
+Open **`05_lightgbm.Rmd`**.

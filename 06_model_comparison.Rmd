@@ -1,0 +1,337 @@
+---
+title: "Lesson 6 — Comparing models and reporting them like a researcher"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Goal
+
+You have trained five models on **the same training data**, tuned them on
+**the same CV folds**, and tested them on **the same 76 test patients**.
+Now we compare them properly. That means looking at more than "which AUC is
+highest":
+
+1. **Discrimination**: can the model rank patients by risk? (AUC, with 95% CI)
+2. **Calibration**: are the predicted probabilities *correct*? If the model
+   says 30%, do about 30% of those patients have CAD?
+3. **Clinical usefulness**: would using the model lead to better decisions
+   than "treat everyone" or "treat no one"? (decision curve analysis)
+4. **Uncertainty**: are the differences real or just noise?
+
+> Run Lessons 2–5 first. They save their results in the `results/` folder.
+
+# Load packages and results
+
+```{r packages}
+library(tidyverse)
+library(tidymodels)
+tidymodels_prefer()
+
+# list.files() finds files whose names match a pattern; full.names gives the full path
+pred_files <- list.files("results", pattern = "^pred_", full.names = TRUE)
+cv_files   <- list.files("results", pattern = "^cv_",   full.names = TRUE)
+
+# map() applies readRDS to each file; list_rbind() stacks the results into one table
+all_preds <- pred_files |> map(readRDS) |> list_rbind()
+all_cv    <- cv_files   |> map(readRDS) |> list_rbind()
+
+# Fix the order models appear in tables and plots (simplest to most complex)
+model_order <- c("Logistic regression", "LASSO logistic", "Random forest", "XGBoost", "LightGBM")
+all_preds <- all_preds |> mutate(model = factor(model, levels = model_order))
+all_cv    <- all_cv    |> mutate(model = factor(model, levels = model_order))
+
+count(all_preds, model)   # each model should have 76 test predictions
+```
+
+# Cross-validation performance (training data)
+
+```{r cv-table}
+all_cv |>
+  arrange(model) |>                                          # sort rows in model_order
+  mutate(value = sprintf("%.3f (%.3f)", mean, std_err)) |>  # format as "mean (SE)"
+  select(model, .metric, value) |>
+  pivot_wider(names_from = .metric, values_from = value) |>  # one column per metric
+  knitr::kable(caption = "10-fold cross-validation on the training set: mean (standard error)")
+```
+
+# Test-set performance with 95% confidence intervals
+
+The test set has only 76 patients, so every estimate is **uncertain**. We
+quantify this with the **bootstrap**:
+
+1. Draw 76 patients **with replacement** from the test set (some appear twice,
+   some not at all).
+2. Compute every model's AUC and Brier score on this resample.
+3. Repeat 1,000 times. The middle 95% of the results is the 95% CI.
+
+Because every model is evaluated on the **same** resampled patients each time
+(a *paired* bootstrap), we can also get a CI for the **difference** between
+two models.
+
+```{r bootstrap}
+set.seed(2024)
+patient_ids <- unique(all_preds$.row)   # the 76 test-patient IDs
+
+# function(i) { ... } defines a small function. map() runs it for i = 1, 2, ..., 1000.
+boot_results <- map(1:1000, function(i) {
+  resampled <- tibble(.row = sample(patient_ids, replace = TRUE))  # step 1: resample patients
+  resampled |>
+    left_join(all_preds, by = ".row", relationship = "many-to-many") |>  # attach each model's predictions
+    group_by(model) |>
+    summarise(                                          # step 2: metrics per model
+      auc   = roc_auc_vec(disease, .pred_Yes),
+      brier = brier_class_vec(disease, .pred_Yes),
+      .groups = "drop"
+    ) |>
+    mutate(boot = i)                                    # remember which repetition this was
+}) |>
+  list_rbind()                                          # stack the 1,000 results
+
+# Point estimates on the real (not resampled) test set
+point_estimates <- all_preds |>
+  group_by(model) |>
+  summarise(auc   = roc_auc_vec(disease, .pred_Yes),
+            brier = brier_class_vec(disease, .pred_Yes),
+            sens  = sensitivity_vec(disease, .pred_class),
+            spec  = specificity_vec(disease, .pred_class))
+
+# Step 3: 95% CIs = 2.5th and 97.5th percentiles of the bootstrap results
+ci <- boot_results |>
+  group_by(model) |>
+  summarise(auc_low   = quantile(auc, 0.025),   auc_high   = quantile(auc, 0.975),
+            brier_low = quantile(brier, 0.025), brier_high = quantile(brier, 0.975))
+
+test_table <- left_join(point_estimates, ci, by = "model")
+
+test_table |>
+  transmute(                                    # transmute = mutate + keep only the new columns
+    Model         = model,
+    `AUC (95% CI)`   = sprintf("%.3f (%.3f–%.3f)", auc, auc_low, auc_high),
+    `Brier (95% CI)` = sprintf("%.3f (%.3f–%.3f)", brier, brier_low, brier_high),
+    Sensitivity   = sprintf("%.2f", sens),
+    Specificity   = sprintf("%.2f", spec)
+  ) |>
+  knitr::kable(caption = "Performance on the held-out test set (n = 76)")
+```
+
+## Is any model *really* better than logistic regression?
+
+```{r paired-difference}
+boot_results |>
+  select(boot, model, auc) |>
+  pivot_wider(names_from = model, values_from = auc) |>   # one column per model
+  mutate(across(                                           # for each model column...
+    -c(boot, `Logistic regression`),
+    ~ .x - `Logistic regression`                           # ...subtract the logistic AUC
+  )) |>
+  select(-boot, -`Logistic regression`) |>
+  pivot_longer(everything(), names_to = "model", values_to = "auc_difference") |>
+  group_by(model) |>
+  summarise(
+    difference = median(auc_difference),
+    ci_low     = quantile(auc_difference, 0.025),
+    ci_high    = quantile(auc_difference, 0.975)
+  ) |>
+  knitr::kable(digits = 3, caption = "AUC difference vs logistic regression (paired bootstrap)")
+```
+
+**How to read this:** if the 95% CI of the difference includes 0, the test
+set gives no evidence that the ML model discriminates better than logistic
+regression. With small samples like this one, that is the usual result, and
+it matches a well-known systematic review: ML did not outperform logistic
+regression for clinical prediction on average (Christodoulou et al., *J Clin
+Epidemiol* 2019).
+
+# ROC curves
+
+```{r roc-all, fig.height=5, fig.width=6}
+all_preds |>
+  group_by(model) |>                       # one curve per model
+  roc_curve(truth = disease, .pred_Yes) |>
+  autoplot() +
+  labs(title = "ROC curves on the test set")
+```
+
+# Calibration: are the probabilities right?
+
+A model can rank patients well (high AUC) but still give **wrong
+probabilities**, for example predicting 80% for patients whose real risk is 50%.
+Clinicians act on probabilities, so calibration matters.
+
+**Calibration plot:** sort patients into groups by predicted risk, then
+compare the **average predicted** risk to the **observed** proportion with CAD
+in each group. A perfect model lies on the diagonal.
+
+```{r calibration-plot, fig.height=6, fig.width=9}
+calibration_data <- all_preds |>
+  group_by(model) |>
+  mutate(risk_group = ntile(.pred_Yes, 5)) |>   # 5 groups of ~15 patients, from lowest to highest predicted risk
+  group_by(model, risk_group) |>
+  summarise(
+    predicted = mean(.pred_Yes),                # average predicted probability in the group
+    observed  = mean(disease == "Yes"),         # actual proportion with CAD in the group
+    n         = n(),
+    .groups = "drop"
+  )
+
+ggplot(calibration_data, aes(x = predicted, y = observed)) +
+  geom_abline(linetype = "dashed", colour = "grey50") +   # the perfect-calibration line
+  geom_line(colour = "steelblue") +
+  geom_point(colour = "steelblue", size = 2) +
+  facet_wrap(~ model) +
+  coord_equal(xlim = c(0, 1), ylim = c(0, 1)) +           # same scale on both axes
+  labs(x = "Predicted probability", y = "Observed proportion with CAD",
+       title = "Calibration on the test set (5 risk groups)") +
+  theme_minimal()
+```
+
+## Calibration intercept and slope
+
+* **Calibration slope** = 1 is ideal. **< 1** means predictions are too
+  extreme (typical of overfitting). **> 1** means too modest.
+* **Calibration intercept** (calibration-in-the-large) = 0 is ideal. It shows
+  whether risks are systematically too high or too low.
+
+```{r calibration-stats}
+calibration_stats <- function(truth, prob) {
+  y  <- as.integer(truth == "Yes")                       # 1 = CAD, 0 = no CAD
+  lp <- qlogis(pmin(pmax(prob, 0.001), 0.999))           # probability to log-odds (avoid 0 and 1)
+  slope     <- coef(glm(y ~ lp, family = binomial))[2]   # logistic regression of outcome on log-odds
+  intercept <- coef(glm(y ~ offset(lp), family = binomial))[1]  # intercept with slope fixed at 1
+  tibble(cal_intercept = intercept, cal_slope = slope)
+}
+
+all_preds |>
+  group_by(model) |>
+  summarise(calibration_stats(disease, .pred_Yes)) |>
+  knitr::kable(digits = 2, caption = "Calibration intercept (ideal 0) and slope (ideal 1)")
+```
+
+# Clinical usefulness: decision curve analysis (DCA)
+
+Suppose we refer a patient for angiography if their predicted risk is above
+a **threshold** `t`. Choosing `t` reflects how we weigh a missed case against
+an unnecessary angiogram. **Net benefit** (Vickers & Elkin, 2006) counts true
+positives and subtracts false positives, weighted by that threshold:
+
+`net benefit = TP/n − FP/n × t / (1 − t)`
+
+A model is useful at a threshold if its net benefit is above both reference
+strategies: **"refer everyone"** and **"refer no one"** (net benefit = 0).
+
+```{r dca, fig.height=5, fig.width=8}
+thresholds <- tibble(threshold = seq(0.05, 0.80, by = 0.01))
+prevalence <- mean(all_preds$disease[all_preds$model == "Logistic regression"] == "Yes")
+
+dca <- all_preds |>
+  cross_join(thresholds) |>                 # every prediction paired with every threshold
+  group_by(model, threshold) |>
+  summarise(
+    tp_rate = sum(.pred_Yes >= threshold & disease == "Yes") / n(),  # true positives / n
+    fp_rate = sum(.pred_Yes >= threshold & disease == "No")  / n(),  # false positives / n
+    .groups = "drop"
+  ) |>
+  mutate(
+    net_benefit = tp_rate - fp_rate * threshold / (1 - threshold),   # the net-benefit formula
+    model = as.character(model)
+  )
+
+treat_all <- thresholds |>
+  mutate(model = "Refer everyone",
+         net_benefit = prevalence - (1 - prevalence) * threshold / (1 - threshold))
+
+bind_rows(dca, treat_all) |>
+  ggplot(aes(x = threshold, y = net_benefit, colour = model)) +
+  geom_line(linewidth = 0.8) +
+  geom_hline(yintercept = 0, colour = "black") +           # "refer no one"
+  coord_cartesian(ylim = c(-0.05, prevalence + 0.05)) +    # zoom to the useful range
+  labs(x = "Risk threshold for referral", y = "Net benefit", colour = NULL,
+       title = "Decision curve analysis (test set)") +
+  theme_minimal()
+```
+
+# Choosing a final model
+
+There is no automatic answer. Weigh:
+
+* **Performance**, *including uncertainty*. Overlapping CIs mean "no
+  demonstrated difference".
+* **Calibration**: a well-calibrated simpler model often beats a sharper but
+  mis-calibrated complex one.
+* **Interpretability and implementation**: logistic regression can be written
+  as a score on paper. A boosted model needs software.
+* **Parsimony**: when performance is similar, prefer the simpler model.
+
+Note also that cross-validated AUCs (about 0.91–0.93) are higher than test AUCs. With
+76 test patients the test estimate is noisy, and we selected the best tuning
+values *on* those CV results (a small optimistic bias). This is one reason why
+**external validation** in a different hospital or time period is the gold
+standard.
+
+# Reporting: write results directly from the code
+
+R Markdown can put numbers from your code **inside your text** with inline
+code: a backtick, the letter r, a space, your code, and a closing backtick.
+The numbers update automatically if the data change, so there are no
+copy-paste errors.
+
+```{r best-model}
+best <- test_table |> slice_max(auc, n = 1)   # the row with the highest test AUC
+```
+
+> **Example results sentence (rendered from code):** On the held-out test set
+> (n = `r nrow(filter(all_preds, model == "Logistic regression"))`), the
+> highest AUC was obtained by `r best$model` (`r sprintf("%.2f", best$auc)`;
+> 95% CI `r sprintf("%.2f", best$auc_low)`–`r sprintf("%.2f", best$auc_high)`).
+> Logistic regression achieved an AUC of
+> `r sprintf("%.2f", test_table$auc[test_table$model == "Logistic regression"])`.
+
+## Reporting checklist: TRIPOD+AI
+
+For prediction-model papers, follow **TRIPOD+AI** (Collins et al., *BMJ*
+2024; <https://www.tripod-statement.org>). The key items, and where they are
+in this course:
+
+| TRIPOD+AI item | Where in the course |
+|---|---|
+| Data source, eligibility, dates | Lesson 1 *Project intent* |
+| Outcome definition | Lesson 1 *Clean the data* |
+| Predictors and how they were handled | Lesson 1 data dictionary, recipes |
+| Missing data handling | Recipes (imputation within resampling) |
+| Sample size / number of events | Lesson 1 outcome balance, Lesson 2 caution |
+| Model type, hyperparameter tuning | Lessons 2–5 (grids, 10-fold CV) |
+| Performance: discrimination **and** calibration | This lesson |
+| Clinical utility | Decision curve analysis (this lesson) |
+| Uncertainty (CIs) | Bootstrap (this lesson) |
+| Code and software availability | `sessionInfo()` below + share your `.Rmd` |
+
+# Reproducibility information
+
+```{r session-info}
+sessionInfo()   # prints R version and package versions. Always include this in research
+```
+
+# Key takeaways
+
+* Compare models on **the same patients**, with **CIs**, not just point
+  estimates.
+* Report **discrimination, calibration and clinical utility**.
+* On small tabular datasets, complex ML often **does not beat** logistic
+  regression. Report that honestly.
+* Use inline R code so your text and results never disagree.
+
+# Next
+
+Open **`07_research_project_TEMPLATE.Rmd`**, a complete, reusable template
+that applies everything to a **new** public dataset. Copy it for your own
+studies.

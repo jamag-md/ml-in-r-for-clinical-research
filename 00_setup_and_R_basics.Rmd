@@ -1,0 +1,264 @@
+---
+title: "Lesson 0 — Setup and the R basics you need"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+# This hidden chunk sets options for the whole document.
+# echo = TRUE means "show the code in the final report".
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# What this lesson is for
+
+Before building machine-learning (ML) models you need three things:
+
+1. **The tools installed** (R, RStudio, and some add-on *packages*).
+2. **How an R Markdown file works**, because every lesson is one.
+3. **About 10 R ideas** you will see in every lesson. You do **not** need to
+   become a programmer. You need to be able to *read* code and change it.
+
+Time needed: about 1–2 hours.
+
+# Install the software (one time only)
+
+| Step | What | Where |
+|------|------|-------|
+| 1 | **R**, the language that runs the calculations (designed for R 4.6.1) | <https://cran.r-project.org> |
+| 2 | **RStudio Desktop**, the program you type in | <https://posit.co/download/rstudio-desktop/> |
+| 3 | **Packages**, free add-ons that contain the ML methods | Section 4 below |
+
+> **Tip:** Install R first, then RStudio. RStudio finds R automatically.
+
+# A tour of RStudio
+
+When you open RStudio you see four panels:
+
+| Panel | Usual position | What it does |
+|-------|----------------|--------------|
+| **Source / editor** | top-left | Where this `.Rmd` file is open. You write and edit here. |
+| **Console** | bottom-left | Where code actually runs. Results and errors print here. |
+| **Environment** | top-right | Lists the objects (datasets, models) currently in memory. |
+| **Files / Plots / Help** | bottom-right | Your folders, your graphs, and the help pages. |
+
+## Open the course as a *Project*
+
+Double-click **`ML_in_R_course.Rproj`** in this folder. This opens RStudio
+*inside* the course folder, so file paths like `data/heart_clean.rds` always
+work. **Always open the course this way.**
+
+## How an R Markdown (`.Rmd`) file works
+
+An `.Rmd` file mixes three things:
+
+1. **The header** (the part between the `---` lines at the top): title,
+   author, output format.
+2. **Normal text**, like this paragraph. You write your project's intent,
+   methods and interpretation here, as in a paper.
+3. **Code chunks**, the grey boxes that start with ```` ```{r} ````. Only
+   these are run as R code.
+
+Keyboard shortcuts you will use constantly:
+
+| Action | Windows shortcut | Button |
+|--------|------------------|--------|
+| Run the current line or selection | `Ctrl + Enter` | "Run" |
+| Run the whole chunk | `Ctrl + Shift + Enter` | green ▶ on the chunk |
+| Run all chunks above this one | `Ctrl + Alt + P` | grey ▼ on the chunk |
+| **Knit** (build the full HTML report) | `Ctrl + Shift + K` | "Knit" (ball of yarn) |
+| Insert a new chunk | `Ctrl + Alt + I` | "+C" button |
+
+> **How to learn with these files:** run each chunk **one at a time** with the
+> green ▶, read the output, and only then move on. When you finish, click
+> **Knit** to get a clean HTML report of everything.
+
+# Install the packages (one time only)
+
+A *package* is a bundle of functions written by other people. You install a
+package **once** with `install.packages()`, and you *load* it **every
+session** with `library()`. It's like installing an app on your phone once
+and then opening it whenever you need it.
+
+The chunk below has `eval=FALSE`, so it does **not** run when you Knit. Run
+it **by hand once**: put the cursor inside the chunk and press
+`Ctrl + Shift + Enter`. It can take 5–10 minutes.
+
+```{r install-packages, eval=FALSE}
+# c() means "combine". It builds a list of package names (text goes in quotes).
+packages_needed <- c(
+  "tidyverse",   # data handling (dplyr) and plots (ggplot2)
+  "tidymodels",  # one consistent toolkit for ML: split, preprocess, tune, evaluate
+  "gtsummary",   # publication-ready "Table 1" and regression tables
+  "broom.helpers", # needed by gtsummary for regression tables
+  "skimr",       # quick summary of every variable in a dataset
+  "glmnet",      # penalized (LASSO / ridge) logistic regression
+  "ranger",      # fast random forests
+  "xgboost",     # XGBoost gradient boosting
+  "lightgbm",    # LightGBM gradient boosting
+  "bonsai"       # connects LightGBM to tidymodels
+)
+
+# Keep only the packages that are not installed yet.
+# installed.packages() lists what you have; rownames() pulls out the names.
+# setdiff(A, B) gives the items in A that are not in B.
+missing_packages <- setdiff(packages_needed, rownames(installed.packages()))
+
+# Install whatever is missing. If nothing is missing, this does nothing.
+install.packages(missing_packages)
+```
+
+Check that everything loads. If a line gives an error like
+`there is no package called 'xxx'`, run `install.packages("xxx")` in the
+Console.
+
+```{r load-check}
+library(tidyverse)   # loads ggplot2, dplyr, readr, tidyr, and others
+library(tidymodels)  # loads rsample, recipes, parsnip, tune, yardstick, and others
+library(bonsai)      # makes LightGBM available inside tidymodels
+
+# R.version.string is a built-in piece of text with your R version.
+R.version.string
+```
+
+# The R ideas you need (and nothing more)
+
+## Objects and the assignment arrow `<-`
+
+`<-` means "store the result on the right under the name on the left". The
+name then appears in the **Environment** panel.
+
+```{r objects}
+age <- 63            # store the number 63 under the name "age"
+age                  # typing a name alone prints its value
+age_in_months <- age * 12   # do maths with it and store the result
+age_in_months
+```
+
+## Vectors: many values in one object
+
+```{r vectors}
+# c() combines values into a "vector" (a column of values of the same type)
+cholesterol <- c(233, 286, 229, 250, 204)
+
+mean(cholesterol)    # mean() is a function: name, then the input in brackets
+length(cholesterol)  # how many values there are
+cholesterol > 240    # compares each value; gives TRUE or FALSE for each one
+```
+
+## Functions and their *arguments*
+
+A function is `name(argument1 = value, argument2 = value)`. To read the help
+page for any function, type `?` and the name in the Console, e.g. `?mean`.
+
+```{r functions}
+# round() takes a number and how many digits to keep.
+round(3.14159, digits = 2)
+
+# If you give arguments in the documented order, you can drop the names:
+round(3.14159, 2)
+```
+
+## Data frames (tibbles): your dataset
+
+A **data frame** is a table: rows are patients (observations) and columns are
+variables. The tidyverse version is called a **tibble**.
+
+```{r dataframes}
+# tibble() builds a small table. Each argument becomes a column.
+patients <- tibble(
+  id      = 1:4,                          # 1:4 means 1, 2, 3, 4
+  age     = c(63, 67, 37, 41),
+  sex     = c("Male", "Male", "Male", "Female"),
+  disease = c("No", "Yes", "No", "No")
+)
+
+patients            # print the table
+nrow(patients)      # number of rows
+patients$age        # the $ sign pulls out one column
+```
+
+## Factors: categorical variables
+
+A **factor** is R's way of storing a categorical variable (e.g. sex, disease
+yes/no). ML functions need categorical outcomes stored as factors.
+
+```{r factors}
+patients$disease <- factor(patients$disease, levels = c("Yes", "No"))
+levels(patients$disease)  # the categories, in their set order
+```
+
+> **Remember for later:** in **tidymodels**, the **first level** of the
+> outcome factor is treated as the "event" (the thing we try to predict).
+> That is why we put `"Yes"` first.
+
+## The pipe `|>`: "and then..."
+
+The pipe passes the result on its left into the function on its right. Read
+it aloud as **"and then"**.
+
+```{r pipe}
+patients |>                      # take the patients table, AND THEN
+  filter(age > 40) |>            # keep only rows where age is over 40, AND THEN
+  select(id, age, disease)       # keep only these three columns
+```
+
+Main **dplyr** verbs (all used in the lessons):
+
+| Verb | What it does |
+|------|--------------|
+| `filter()` | keep rows that meet a condition |
+| `select()` | keep (or drop) columns |
+| `mutate()` | create or change a column |
+| `summarise()` | collapse many rows into a summary (mean, count...) |
+| `group_by()` | do the next step separately for each group |
+| `count()` | count rows per category |
+
+## Plots with ggplot2
+
+`ggplot()` builds a plot in layers joined with `+` (not with `|>`).
+
+```{r ggplot-demo, fig.height=3, fig.width=5}
+ggplot(patients, aes(x = disease, y = age)) +  # data, and which columns go on which axis
+  geom_point(size = 3) +                        # draw points
+  labs(title = "Age by disease status")         # add a title
+```
+
+## Reproducibility: `set.seed()`
+
+ML uses randomness (random data splits, random trees). `set.seed(number)`
+makes the "random" results **the same every time you run the code**, which
+reproducible research requires.
+
+```{r seed}
+set.seed(123)
+sample(1:10, 3)   # pick 3 random numbers between 1 and 10
+set.seed(123)
+sample(1:10, 3)   # same seed, so exactly the same 3 numbers
+```
+
+# When you get an error
+
+1. **Read the last line of the red text.** It usually says what is wrong.
+2. Common causes: a typo in a name, a missing bracket or comma, a package
+   not loaded (run the `library()` chunk), or running chunks out of order.
+3. Click **Session → Restart R**, then use the grey ▼ "run all chunks above".
+4. Paste the error into a search engine or ask an AI assistant. Include the
+   code that caused it.
+
+# Check your understanding
+
+1. What is the difference between `install.packages()` and `library()`?
+2. What does `<-` do?
+3. In `patients |> filter(age > 40)`, what does `|>` mean?
+4. Why must we call `set.seed()` in ML research?
+
+# Next
+
+Open **`01_data_import_and_exploration.Rmd`**.

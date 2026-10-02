@@ -1,0 +1,323 @@
+---
+title: "Lesson 1 — Getting real public data, cleaning it, and exploring it"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# Project intent
+
+> In a real study this section is your **introduction and aim**. Write it
+> *before* touching the data. It stops you from "fishing" for results later.
+
+**Research question.** Can routinely collected clinical and exercise-test
+variables predict whether a patient has angiographically confirmed coronary
+artery disease (CAD)?
+
+**Why it matters.** Coronary angiography is invasive. A model that estimates
+the probability of CAD from non-invasive data could help decide who needs it.
+
+**Data source.** The *Cleveland Heart Disease* dataset from the UCI Machine
+Learning Repository: 303 patients referred for angiography at the Cleveland
+Clinic Foundation (Detrano et al., 1989). It is free and public:
+
+* Janosi A, Steinbrunn W, Pfisterer M, Detrano R. *Heart Disease* [Dataset].
+  UCI Machine Learning Repository, 1989. <https://doi.org/10.24432/C52P4X>
+
+**Outcome.** CAD present (`Yes`) if any major vessel has more than 50%
+diameter narrowing, otherwise `No`.
+
+**What this lesson produces.** A clean dataset and a fixed **training/test
+split**, saved to the `data/` folder and reused by every later lesson, so
+that all models are compared on exactly the same patients.
+
+# Load the packages
+
+```{r packages}
+library(tidyverse)   # data handling and plots
+library(tidymodels)  # we only need rsample (the data splitting tool) from it today
+library(skimr)       # skim(): a quick overview of every variable
+library(gtsummary)   # tbl_summary(): publication-style "Table 1"
+```
+
+# Download the data from the web
+
+The file is a plain text file with commas between values (a **CSV**), but it
+has **no header row** (no column names) and uses `?` for missing values. We
+tell R both things.
+
+```{r download}
+# The web address of the raw data file. We store it as text in an object.
+data_url <- "https://archive.ics.uci.edu/ml/machine-learning-databases/heart-disease/processed.cleveland.data"
+
+# Names for the 14 columns, in the order given by the dataset documentation.
+column_names <- c("age", "sex", "chest_pain", "resting_bp", "cholesterol",
+                  "fasting_bs", "rest_ecg", "max_hr", "exercise_angina",
+                  "st_depression", "st_slope", "n_vessels", "thal", "num")
+
+# read_csv() reads a CSV file (it can read directly from a web address).
+heart_raw <- read_csv(
+  data_url,
+  col_names = column_names,   # use our names because the file has no header
+  na = "?"                    # treat "?" as missing (NA in R)
+)
+
+# Save an untouched copy on your computer, so you never depend on the website.
+# dir.create() makes a folder; showWarnings = FALSE stops a warning if it exists.
+dir.create("data", showWarnings = FALSE)
+write_csv(heart_raw, "data/heart_raw.csv")
+
+# Look at the first rows. head() shows the first 6 by default.
+head(heart_raw)
+```
+
+> **Good research practice:** keep the raw data **unchanged**. Every cleaning
+> step happens in code, so anyone can repeat it exactly.
+
+# Understand the variables (the "data dictionary")
+
+Every value is stored as a number, but many are really **categories**. The
+dataset documentation tells us what each code means:
+
+| Column | Meaning | Coding |
+|--------|---------|--------|
+| `age` | Age (years) | number |
+| `sex` | Sex | 0 = female, 1 = male |
+| `chest_pain` | Chest pain type | 1 = typical angina, 2 = atypical angina, 3 = non-anginal, 4 = asymptomatic |
+| `resting_bp` | Resting systolic blood pressure (mmHg) | number |
+| `cholesterol` | Serum cholesterol (mg/dL) | number |
+| `fasting_bs` | Fasting blood sugar > 120 mg/dL | 0 = no, 1 = yes |
+| `rest_ecg` | Resting ECG | 0 = normal, 1 = ST-T abnormality, 2 = left ventricular hypertrophy |
+| `max_hr` | Maximum heart rate on exercise test | number |
+| `exercise_angina` | Exercise-induced angina | 0 = no, 1 = yes |
+| `st_depression` | ST depression on exercise relative to rest (mm) | number |
+| `st_slope` | Slope of the peak exercise ST segment | 1 = up, 2 = flat, 3 = down |
+| `n_vessels` | Major vessels coloured by fluoroscopy | 0–3 |
+| `thal` | Thallium stress test | 3 = normal, 6 = fixed defect, 7 = reversible defect |
+| `num` | Angiographic diagnosis | 0 = no CAD, 1–4 = CAD |
+
+# Clean the data
+
+Here we turn number codes into labelled **factors**, create the outcome, and
+remove the original `num` column. Leaving `num` in would let the model "cheat",
+because it *is* the answer. This mistake is called **target leakage**.
+
+```{r clean}
+heart <- heart_raw |>                 # start from the raw data, AND THEN
+  mutate(                             # create or overwrite columns:
+
+    # factor(x, levels = codes, labels = names) turns codes into categories
+    sex = factor(sex, levels = c(0, 1), labels = c("Female", "Male")),
+
+    chest_pain = factor(chest_pain, levels = 1:4,
+                        labels = c("Typical angina", "Atypical angina",
+                                   "Non-anginal pain", "Asymptomatic")),
+
+    fasting_bs = factor(fasting_bs, levels = c(0, 1), labels = c("No", "Yes")),
+
+    # rest_ecg code 1 has only 4 patients. Groups that small make unstable
+    # estimates, so we merge codes 1 and 2 into "Abnormal".
+    # if_else(condition, value if TRUE, value if FALSE)
+    rest_ecg = factor(if_else(rest_ecg == 0, "Normal", "Abnormal"),
+                      levels = c("Normal", "Abnormal")),
+
+    exercise_angina = factor(exercise_angina, levels = c(0, 1), labels = c("No", "Yes")),
+
+    st_slope = factor(st_slope, levels = 1:3,
+                      labels = c("Upsloping", "Flat", "Downsloping")),
+
+    thal = factor(thal, levels = c(3, 6, 7),
+                  labels = c("Normal", "Fixed defect", "Reversible defect")),
+
+    # The OUTCOME: "Yes" if num is 1 to 4, "No" if num is 0.
+    # "Yes" is put FIRST so tidymodels treats it as the event of interest.
+    disease = factor(if_else(num > 0, "Yes", "No"), levels = c("Yes", "No"))
+  ) |>
+  select(-num)                        # the minus sign drops the num column (avoids leakage)
+
+glimpse(heart)   # one line per column: its name, type and first values
+```
+
+Why did we keep a small category in mind? Because we checked the counts.
+`count()` is how you would find this yourself:
+
+```{r check-counts}
+count(heart_raw, rest_ecg)   # how many patients per original rest_ecg code
+```
+
+# Explore the data (EDA)
+
+**Exploratory data analysis (EDA)** means looking at the data before
+modelling. Look at missing values, distributions, odd values, and the outcome
+balance.
+
+## Quick overview
+
+```{r skim}
+skim(heart)   # for each variable: type, number missing, mean, sd, percentiles, histogram
+```
+
+## Missing values
+
+```{r missing}
+# is.na() is TRUE where a value is missing. colSums() adds up the TRUEs per column.
+colSums(is.na(heart))
+```
+
+Only 6 values are missing (`n_vessels` 4, `thal` 2). We will **not** delete
+these patients. Instead the models will **impute** (fill in) these values
+*using only training data* (explained in Lesson 2).
+
+## Is the outcome balanced?
+
+```{r outcome-balance, fig.height=3, fig.width=5}
+heart |>
+  count(disease) |>                          # number of patients per outcome
+  mutate(percent = round(100 * n / sum(n), 1))  # turn counts into percentages
+
+ggplot(heart, aes(x = disease, fill = disease)) +
+  geom_bar() +                                # bar height = count of patients
+  labs(x = "Coronary artery disease", y = "Number of patients") +
+  theme_minimal() +
+  theme(legend.position = "none")             # the legend would repeat the x-axis
+```
+
+About 46% have CAD, so the outcome is fairly **balanced**. With a rare outcome
+(say 5%), accuracy becomes misleading and you would need extra care (see the
+glossary in `README.md`).
+
+## Table 1: patient characteristics by outcome
+
+`tbl_summary()` makes the classic "Table 1" of a clinical paper in one line.
+
+```{r table1}
+heart |>
+  tbl_summary(
+    by = disease,                         # one column per outcome group
+    missing_text = "Missing"              # how missing values are labelled
+  ) |>
+  add_overall() |>                        # add an "Overall" column
+  add_p() |>                              # add p-values (group comparison tests)
+  bold_labels()                           # make variable names bold
+```
+
+## Distributions of the numeric variables
+
+To plot all numeric variables together, we first reshape the data from
+**wide** (one column per variable) to **long** (one row per patient-variable
+pair). `pivot_longer()` does this.
+
+```{r numeric-plots, fig.height=5, fig.width=9}
+heart |>
+  select(where(is.numeric), disease) |>   # keep numeric columns plus the outcome
+  pivot_longer(
+    cols = -disease,                      # reshape every column except disease
+    names_to = "variable",                # old column names go in "variable"
+    values_to = "value"                   # their values go in "value"
+  ) |>
+  ggplot(aes(x = value, fill = disease)) +
+  geom_density(alpha = 0.5) +             # smoothed histogram; alpha = transparency
+  facet_wrap(~ variable, scales = "free") + # one small panel per variable
+  theme_minimal()
+```
+
+**What to look for:** variables whose curves are clearly separated (for
+example `max_hr`, `st_depression` and `n_vessels`) are likely strong
+predictors.
+
+## Categorical variables vs the outcome
+
+```{r categorical-plots, fig.height=6, fig.width=9}
+heart |>
+  select(where(is.factor)) |>             # keep only factor (categorical) columns
+  pivot_longer(cols = -disease, names_to = "variable", values_to = "category") |>
+  ggplot(aes(x = category, fill = disease)) +
+  geom_bar(position = "fill") +           # "fill" = bars show proportions, not counts
+  facet_wrap(~ variable, scales = "free_x") +
+  labs(y = "Proportion") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 30, hjust = 1))  # tilt the labels
+```
+
+# The most important step in ML: split the data
+
+## Why split?
+
+A model that is tested on the same patients it learned from will look much
+better than it really is, because it partly **memorises** them. This is
+called **overfitting**. To get an honest estimate, we hide some patients from
+the model and test on them at the very end.
+
+* **Training set (75%)**: used to build and tune the models.
+* **Test set (25%)**: locked away and used **once**, at the very end.
+
+`strata = disease` keeps the same proportion of CAD in both sets
+(**stratified split**).
+
+```{r split}
+set.seed(2024)   # makes the random split identical every time
+
+heart_split <- initial_split(
+  heart,               # the data to split
+  prop = 0.75,         # 75% training, 25% test
+  strata = disease     # keep the outcome proportion similar in both parts
+)
+
+heart_split          # shows <Training/Testing/Total> numbers
+
+heart_train <- training(heart_split)   # pull out the training patients
+heart_test  <- testing(heart_split)    # pull out the test patients
+
+# Check that the outcome proportion is similar in both sets
+bind_rows(
+  train = count(heart_train, disease),
+  test  = count(heart_test, disease),
+  .id = "set"                          # adds a column saying which set each row came from
+) |>
+  group_by(set) |>
+  mutate(percent = round(100 * n / sum(n), 1))
+```
+
+# Save the results for the next lessons
+
+`.rds` is R's own file format. It keeps factor levels and the split object
+exactly as they are.
+
+```{r save}
+saveRDS(heart, "data/heart_clean.rds")        # the clean full dataset
+saveRDS(heart_split, "data/heart_split.rds")  # the split (which patients are train/test)
+```
+
+# Key takeaways
+
+* Write the **research question and outcome definition before** looking at
+  results.
+* Keep raw data unchanged. Do all cleaning **in code**.
+* Remove anything that "contains the answer" (**target leakage**).
+* **Split before modelling.** The test set is touched once, at the end.
+
+# Check your understanding
+
+1. Why did we remove the `num` column?
+2. What would happen to our accuracy estimate if we tested on training data?
+3. What does `strata = disease` do?
+
+# Try it yourself
+
+1. Change `prop = 0.75` to `0.8` and rerun the split. How many test patients
+   are there now? (Change it back afterwards.)
+2. Add `cholesterol` vs `age` as a scatter plot coloured by `disease`. Hint:
+   `ggplot(heart, aes(x = age, y = cholesterol, colour = disease)) + geom_point()`.
+
+# Next
+
+Open **`02_logistic_regression.Rmd`**.

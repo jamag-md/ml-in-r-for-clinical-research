@@ -1,0 +1,248 @@
+---
+title: "Lesson 3 — Decision trees and random forests"
+author: "Your Name"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true
+    toc_float: true
+    number_sections: true
+    theme: flatly
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
+```
+
+# The concept
+
+## Step 1: a single decision tree
+
+A **decision tree** asks a series of yes/no questions, like a clinical
+algorithm:
+
+```
+Is chest pain asymptomatic?
+├── yes → Is thal a reversible defect? → yes → high risk
+└── no  → Are there 0 diseased vessels on fluoroscopy?  → yes → low risk
+```
+
+The computer chooses each question (variable + cut-off) to best separate CAD
+from no CAD.
+
+* **Good:** easy to understand, captures interactions and non-linear effects,
+  no need to rescale variables.
+* **Bad:** **unstable**. Change a few patients and you get a very different
+  tree. A deep tree **overfits** (memorises the training data).
+
+## Step 2: a random forest = many decorrelated trees that vote
+
+A **random forest** (Breiman, 2001) grows hundreds of trees, each slightly
+different, and **averages their votes**:
+
+1. **Bootstrap (bagging):** each tree is trained on a random resample of the
+   patients (drawn *with replacement*).
+2. **Random feature subset:** at each split, a tree may only choose from a
+   random subset of `mtry` variables. This stops all trees from looking the
+   same.
+3. **Average:** the predicted probability is the share of trees voting "CAD".
+
+Averaging many noisy-but-different trees cancels out their errors. That is the
+"wisdom of crowds".
+
+## The hyperparameters you will tune
+
+| Hyperparameter | Meaning | Effect |
+|----------------|---------|--------|
+| `mtry` | Number of variables each split can choose from | Small = more diverse trees. Large = stronger individual trees |
+| `min_n` | Minimum patients in a node to split it further | Small = deeper, more complex trees. Large = simpler trees |
+| `trees` | Number of trees | More is better up to a point (500–1000 is usually enough). Not usually tuned |
+
+# Load packages and data
+
+```{r packages}
+library(tidyverse)
+library(tidymodels)
+tidymodels_prefer()
+
+heart_split <- readRDS("data/heart_split.rds")   # same split as all other lessons
+heart_train <- training(heart_split)
+heart_test  <- testing(heart_split)
+
+set.seed(2024)                                    # same folds as Lesson 2
+heart_folds <- vfold_cv(heart_train, v = 10, strata = disease)
+
+heart_metrics <- metric_set(roc_auc, brier_class, accuracy, sensitivity, specificity)
+```
+
+# The recipe: trees need less preprocessing
+
+Trees split on cut-offs ("is age > 55?"), so they **don't need** dummy
+variables or normalization. The `ranger` package handles categories directly.
+We only fill in missing values.
+
+```{r recipe}
+rf_recipe <- recipe(disease ~ ., data = heart_train) |>
+  step_impute_median(all_numeric_predictors()) |>   # fill missing numbers (training median)
+  step_impute_mode(all_nominal_predictors())        # fill missing categories (most frequent)
+```
+
+# Warm-up: one decision tree, to see the idea
+
+```{r single-tree, fig.height=6, fig.width=9}
+tree_spec <- decision_tree(tree_depth = 3) |>  # limit to 3 levels of questions, to keep it readable
+  set_engine("rpart") |>                       # rpart = recursive partitioning (comes with R)
+  set_mode("classification")
+
+tree_fit <- workflow() |>
+  add_recipe(rf_recipe) |>
+  add_model(tree_spec) |>
+  fit(data = heart_train)                      # fit() trains on the data given
+
+# Draw the tree. extract_fit_engine() gives the underlying rpart object.
+tree_engine <- extract_fit_engine(tree_fit)
+plot(tree_engine, uniform = TRUE, margin = 0.1)   # draw the branches
+text(tree_engine, use.n = TRUE, cex = 0.7)        # add the labels; use.n shows counts (Yes/No)
+```
+
+Read it from the top: at each split, patients for whom the condition is
+**true go left**. The leaves show the predicted class and the number of
+`Yes/No` training patients that ended up there.
+
+# Random forest: the 5 tidymodels steps
+
+## Model specification with hyperparameters to tune
+
+```{r rf-spec}
+rf_spec <- rand_forest(
+  mtry  = tune(),     # to be tuned
+  min_n = tune(),     # to be tuned
+  trees = 500         # fixed: 500 trees
+) |>
+  set_engine(
+    "ranger",
+    importance = "permutation",  # compute variable importance (explained below)
+    seed = 2024                  # makes ranger's internal randomness reproducible
+  ) |>
+  set_mode("classification")
+
+rf_wf <- workflow() |>
+  add_recipe(rf_recipe) |>
+  add_model(rf_spec)
+```
+
+## Tuning with a grid search + cross-validation
+
+We try 5 values of `mtry` × 5 values of `min_n` = **25 combinations**. Each
+is evaluated with 10-fold CV, so that is 250 forests. This may take a minute.
+
+```{r rf-tune}
+rf_grid <- grid_regular(
+  mtry(range = c(1, 10)),    # we have 13 predictors. Try 1 to 10 per split
+  min_n(range = c(2, 30)),   # minimum node size from 2 to 30 patients
+  levels = 5                 # 5 values of each, evenly spaced
+)
+
+rf_grid   # look at the combinations we will try
+
+rf_tune <- tune_grid(
+  rf_wf,
+  resamples = heart_folds,
+  grid      = rf_grid,
+  metrics   = heart_metrics
+)
+```
+
+```{r rf-tune-plot, fig.height=5, fig.width=9}
+autoplot(rf_tune)   # one line per min_n value. x-axis = mtry
+```
+
+```{r rf-best}
+show_best(rf_tune, metric = "roc_auc", n = 5)
+best_rf <- select_best(rf_tune, metric = "roc_auc")
+best_rf
+```
+
+> **Tip:** if the best value sits at the **edge** of the grid (for example
+> `min_n = 30`), widen the range and tune again. The optimum might lie beyond.
+> (`mtry` cannot go below 1. A best `mtry` of 1 just means very random,
+> very diverse trees worked well on this small dataset.)
+
+## Final model and test-set evaluation
+
+```{r rf-final}
+rf_final_wf <- finalize_workflow(rf_wf, best_rf)   # plug in the best mtry and min_n
+
+rf_final <- last_fit(rf_final_wf, split = heart_split, metrics = heart_metrics)
+
+collect_metrics(rf_final)   # performance on the untouched test set
+```
+
+```{r rf-roc, fig.height=4, fig.width=4}
+collect_predictions(rf_final) |>
+  roc_curve(truth = disease, .pred_Yes) |>
+  autoplot()
+```
+
+# Which variables matter? (variable importance)
+
+A forest has no odds ratios. Instead we use **permutation importance**:
+shuffle one variable's values at random, which destroys its information, and
+measure how much the prediction accuracy drops. A big drop means an important
+variable.
+
+```{r rf-importance, fig.height=4, fig.width=7}
+rf_importance <- rf_final |>
+  extract_fit_engine() |>            # the ranger model inside the workflow
+  pluck("variable.importance") |>    # pluck() pulls one element out of a list
+  enframe(name = "variable", value = "importance")   # named numbers to a two-column table
+
+ggplot(rf_importance, aes(x = importance, y = reorder(variable, importance))) +
+  geom_col(fill = "forestgreen") +
+  labs(x = "Permutation importance (drop in accuracy when shuffled)", y = NULL,
+       title = "Random forest variable importance") +
+  theme_minimal()
+```
+
+> **Interpretation caution:** importance says **how much** the model relies on
+> a variable, not the **direction** (risk up or down), and not causation.
+> Correlated variables can share or "steal" importance from each other.
+
+# Save results for Lesson 6
+
+```{r save}
+collect_predictions(rf_final) |>
+  mutate(model = "Random forest") |>
+  select(model, .row, disease, .pred_Yes, .pred_class) |>  # .row = patient ID
+  saveRDS("results/pred_rf.rds")
+
+collect_metrics(rf_tune) |>
+  filter(.config == best_rf$.config) |>
+  mutate(model = "Random forest") |>
+  select(model, .metric, mean, std_err) |>
+  saveRDS("results/cv_rf.rds")
+```
+
+# Key takeaways
+
+* A **decision tree** is interpretable but unstable. A **random forest**
+  averages many randomized trees and is much more stable and accurate.
+* Key hyperparameters: `mtry` and `min_n`. Tune them with **CV**.
+* Trees need little preprocessing: no dummies, no scaling.
+* Use **permutation importance** to see what the model relies on.
+
+# Check your understanding
+
+1. What two sources of randomness make the trees in a forest different?
+2. Why does a single deep tree overfit?
+3. What does permutation importance **not** tell you?
+
+# Try it yourself
+
+1. Change `trees = 500` to `trees = 100` and then `2000`. Does test AUC change
+   much?
+2. Change `tree_depth = 3` to `5` in the single tree. Is it still readable?
+
+# Next
+
+Open **`04_xgboost.Rmd`**.
