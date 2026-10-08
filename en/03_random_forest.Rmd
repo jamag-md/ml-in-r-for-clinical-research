@@ -102,7 +102,7 @@ tree_fit <- workflow() |>
 # Draw the tree. extract_fit_engine() gives the underlying rpart object.
 tree_engine <- extract_fit_engine(tree_fit)
 plot(tree_engine, uniform = TRUE, margin = 0.1)   # draw the branches
-text(tree_engine, use.n = TRUE, cex = 0.7)        # add the labels; use.n shows counts (Yes/No)
+text(tree_engine, use.n = TRUE, pretty = 0, cex = 0.7)   # labels; use.n = counts (Yes/No); pretty = 0 = full category names
 ```
 
 Read it from the top: at each split, patients for whom the condition is
@@ -154,8 +154,15 @@ rf_tune <- tune_grid(
 ```
 
 ```{r rf-tune-plot, fig.height=5, fig.width=9}
-autoplot(rf_tune)   # one line per min_n value. x-axis = mtry
+autoplot(rf_tune) +                                       # one line per min_n value. x-axis = mtry
+  scale_x_continuous(breaks = sort(unique(rf_grid$mtry))) +   # ticks only at the mtry values we tried
+  labs(x = "Variables tried at each split (mtry)",
+       colour = "Minimum node size (min_n)", shape = "Minimum node size (min_n)")
 ```
+
+The ticks on the x-axis are exactly the `mtry` values in the grid (1, 3, 5,
+7 and 10 variables), so you can read each point straight off the axis.
+
 
 ```{r rf-best}
 show_best(rf_tune, metric = "roc_auc", n = 5)
@@ -241,7 +248,51 @@ collect_metrics(rf_tune) |>
 
 1. Change `trees = 500` to `trees = 100` and then `2000`. Does test AUC change
    much?
-2. Change `tree_depth = 3` to `5` in the single tree. Is it still readable?
+
+   > **Answer:** no. In our run the test AUC was about 0.86 with 100, 500 and
+   > 2000 trees (it moved only in the second decimal). After a few hundred
+   > trees the average vote stabilises. Adding more trees **does not cause
+   > overfitting** in a random forest; it only costs computing time. That is
+   > why `trees` is usually fixed (500–1000) rather than tuned.
+
+2. Make the single tree deeper. Change `tree_depth = 3` to `5`. Does the tree
+   change?
+
+   > **Answer:** surprisingly, no: you get the same 3-level tree.
+   > `tree_depth` is a **maximum**, not a target. `rpart` stops earlier when
+   > its other two stopping rules say a further split isn't worth it:
+   >
+   > * `cost_complexity` (default 0.01): a split is kept only if it improves
+   >   the overall fit by at least 1%. Nodes that are already fairly "pure"
+   >   (mostly Yes or mostly No) are not split further.
+   > * `min_n` (default 20): a node needs at least 20 patients before `rpart`
+   >   will try to split it. Small nodes stay as leaves.
+   >
+   > To see a deeper tree, relax all three settings:
+
+   ```{r deeper-tree, fig.height=7, fig.width=11}
+   tree_spec_deep <- decision_tree(
+     tree_depth      = 5,       # allow up to 5 levels of questions
+     cost_complexity = 0.001,   # accept much smaller improvements per split
+     min_n           = 5        # allow splitting nodes with as few as 5 patients
+   ) |>
+     set_engine("rpart") |>
+     set_mode("classification")
+
+   tree_fit_deep <- workflow() |>
+     add_recipe(rf_recipe) |>
+     add_model(tree_spec_deep) |>
+     fit(data = heart_train)
+
+   tree_engine_deep <- extract_fit_engine(tree_fit_deep)
+   plot(tree_engine_deep, uniform = TRUE, margin = 0.05)
+   text(tree_engine_deep, use.n = TRUE, pretty = 0, cex = 0.6)
+   ```
+
+   This tree has 5 levels and many more leaves. It is much harder to read, and
+   its small leaves (a handful of patients each) are a clear sign of
+   **overfitting**. That is exactly why random forests average many trees
+   instead of trusting one deep tree.
 
 # Next
 

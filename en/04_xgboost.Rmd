@@ -28,6 +28,8 @@ draft. Student 2 fixes only what's still wrong. Student 3 fixes what's still
 wrong after that, and so on. Each correction is small, but together they
 produce a very good essay.
 
+![Random forest vs gradient boosting. Left: deep trees built in parallel, each on a random sample, then averaged. Right: small trees built one after another; the grey bars show the error still left, which shrinks with each new tree.](images/rf_vs_boosting.png){width=100%}
+
 **"Gradient"** boosting means each tree is fitted to the *gradient* of the
 loss: in plain words, to the direction in which the current predictions are
 most wrong.

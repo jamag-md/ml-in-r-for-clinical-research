@@ -23,18 +23,61 @@ knitr::opts_chunk$set(echo = TRUE, message = FALSE, warning = FALSE)
 standard method in clinical research and the **baseline every ML model must
 beat**.
 
-## How it works (no maths needed)
+## How it works
 
-1. It adds up the predictors, each multiplied by a weight (a *coefficient*):
-   `score = b0 + b1*age + b2*male + ...`
-2. The score can be any number, so it is squeezed between 0 and 1 by an
-   S-shaped curve (the *logistic* or *sigmoid* function). The result is a
-   probability.
+1. It adds up the predictors, each multiplied by a weight (a *coefficient*).
+2. The total (the *score*) can be any number, so it is squeezed between 0 and
+   1 by an S-shaped curve (the *logistic* or *sigmoid* function). The result
+   is a probability.
 3. The weights are chosen so the predicted probabilities fit the observed
    outcomes as closely as possible (*maximum likelihood*).
 
-**Odds ratio (OR)** = `exp(coefficient)`. An OR of 2 for "male" means men have
-twice the *odds* of CAD as women, **holding the other variables constant**.
+## The same idea as equations
+
+**Step 1: the score** (a weighted sum of the predictors). $\beta_0$ is the
+intercept, and $\beta_1, \beta_2, \dots$ are the coefficients that the model
+learns from the data:
+
+$$
+\text{score} = \beta_0 + \beta_1 \times \text{age} + \beta_2 \times \text{male} + \dots + \beta_k \times x_k
+$$
+
+**Step 2: from score to probability.** The logistic function turns any score
+into a probability $p$ between 0 and 1:
+
+$$
+p = P(\text{CAD} = \text{Yes}) = \frac{1}{1 + e^{-\text{score}}}
+$$
+
+**The same model written the other way round.** The score is the *log-odds*
+of the outcome. That's why each coefficient is "the change in log-odds per
+unit of the predictor":
+
+$$
+\log\left(\frac{p}{1 - p}\right) = \beta_0 + \beta_1 \times \text{age} + \beta_2 \times \text{male} + \dots
+$$
+
+**Odds ratio (OR).** Exponentiating a coefficient gives its odds ratio:
+
+$$
+\text{OR}_j = e^{\beta_j}
+$$
+
+An OR of 2 for "male" means men have twice the *odds* of CAD as women,
+**holding the other variables constant**.
+
+The S-shaped curve in Step 2 looks like this. A score of 0 gives a
+probability of 0.5, large positive scores approach 1, and large negative
+scores approach 0:
+
+```{r sigmoid-curve, fig.height=3.5, fig.width=6}
+# curve() draws a mathematical function. x is the score; the formula is the logistic function.
+curve(1 / (1 + exp(-x)), from = -6, to = 6,
+      xlab = "Score (log-odds)", ylab = "Probability of CAD",
+      lwd = 2, col = "steelblue")
+abline(h = 0.5, lty = 2, col = "grey50")   # dashed line at probability 0.5
+abline(v = 0,   lty = 2, col = "grey50")   # dashed line at score 0
+```
 
 ## Two different questions: *explain* vs *predict*
 
@@ -90,6 +133,14 @@ glm_fit <- glm(
 nobs(glm_fit)   # number of patients actually used
 ```
 
+These are the fitted $\beta$ values: the numbers that fill in the equation
+from section 1.3. A positive $\beta$ raises the score (and the probability of
+CAD); a negative $\beta$ lowers it.
+
+```{r glm-coefficients}
+round(coef(glm_fit), 3)   # coef() extracts the coefficients; round() keeps 3 decimals
+```
+
 ## Odds-ratio table (publication-ready)
 
 ```{r glm-table}
@@ -108,7 +159,11 @@ adjusting for every other variable in the model**.
 > **Caution:** these are *associations*, not causes. Also, with 297 patients,
 > 139 events and 17 coefficients, the model is close to the limit of what the
 > data can support. A common rule of thumb asks for at least 10–20 events per
-> coefficient. For proper sample-size methods see Riley et al., *BMJ* 2020.
+> coefficient, but this rule is crude. For proper sample-size methods see
+> Riley RD, Ensor J, Snell KIE, et al. Calculating the sample size required
+> for developing a clinical prediction model. *BMJ*. 2020;368:m441.
+> <https://doi.org/10.1136/bmj.m441>. The R package `pmsampsize` implements
+> their method.
 
 # Part B: logistic regression as a *predictive* model (tidymodels)
 
@@ -415,6 +470,52 @@ bind_rows(
 2. Try a threshold of 0.7 in the threshold chunk. What happens to
    sensitivity and specificity?
 
+# References and further reading
+
+**Methods behind this lesson**
+
+* Riley RD, Ensor J, Snell KIE, et al. Calculating the sample size required
+  for developing a clinical prediction model. *BMJ*. 2020;368:m441.
+  <https://doi.org/10.1136/bmj.m441>
+* Steyerberg EW, Vergouwe Y. Towards better clinical prediction models: seven
+  steps for development and an ABCD for validation. *Eur Heart J*.
+  2014;35(29):1925–31. <https://doi.org/10.1093/eurheartj/ehu207>.
+  Covers coding of predictors, missing values and internal validation.
+* Kapoor S, Narayanan A. Leakage and the reproducibility crisis in
+  machine-learning-based science. *Patterns*. 2023;4(9):100804.
+  <https://doi.org/10.1016/j.patter.2023.100804>. Explains why preprocessing
+  must be learned from training data only, which is what the recipe does.
+* Hastie T, Tibshirani R, Friedman J. *The Elements of Statistical Learning*,
+  2nd ed. Springer; 2009. Section 7.10.2, "The wrong and right way to do
+  cross-validation". Free PDF: <https://hastie.su.domains/ElemStatLearn/>
+* Christodoulou E, Ma J, Collins GS, et al. A systematic review shows no
+  performance benefit of machine learning over logistic regression for
+  clinical prediction models. *J Clin Epidemiol*. 2019;110:12–22.
+  <https://doi.org/10.1016/j.jclinepi.2019.02.004>
+* Collins GS, Moons KGM, Dhiman P, et al. TRIPOD+AI statement. *BMJ*.
+  2024;385:e078378. <https://doi.org/10.1136/bmj-2023-078378>
+
+**Published clinical studies that used the same tidymodels workflow**
+
+According to their abstracts, these studies built their models with
+tidymodels: data splitting, resampling, preprocessing and tuning, as in this
+course. Read their methods sections to see how they reported each step.
+
+* Lu C, He Y, Chen CR, et al. Development and validation of machine learning
+  models for distant metastasis of primary hepatic carcinoma: a
+  population-based study. *Discov Oncol*. 2025;16:1120.
+  <https://doi.org/10.1007/s12672-025-02894-5>. Eight models in tidymodels,
+  with ROC/AUC, calibration, decision curve analysis and SHAP.
+* Lehan E, Briand P, O'Brien E, et al. Synergistic patient factors are
+  driving recent increased pediatric urgent care demand. *PLOS Digit
+  Health*. 2024;3(8):e0000572. <https://doi.org/10.1371/journal.pdig.0000572>.
+  tidymodels with 5-fold cross-validation and standardized predictors.
+* Estrella T, Capdevila L, Alfonso C, Losilla JM. Machine learning for the
+  analysis of healthy lifestyle data: scoping review and guidelines. *JMIR
+  Hum Factors*. 2026;13:e78648. <https://doi.org/10.2196/78648>. Gives
+  reporting guidelines and recommends tidymodels for replicable workflows.
+
 # Next
 
 Open **`03_random_forest.Rmd`**.
+
