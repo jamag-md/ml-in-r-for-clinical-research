@@ -24,19 +24,62 @@ La **regresión logística** predice la **probabilidad** de un desenlace sí/no
 el método estándar en investigación clínica y la **referencia que todo modelo
 de ML debe superar**.
 
-## Cómo funciona (sin matemáticas)
+## Cómo funciona
 
 1. Suma los predictores, cada uno multiplicado por un peso (un
-   *coeficiente*): `puntuación = b0 + b1*edad + b2*hombre + ...`
-2. La puntuación puede ser cualquier número, así que se comprime entre 0 y 1
-   con una curva en forma de S (la función *logística* o *sigmoide*). El
-   resultado es una probabilidad.
+   *coeficiente*).
+2. El total (la *puntuación*) puede ser cualquier número, así que se
+   comprime entre 0 y 1 con una curva en forma de S (la función *logística* o
+   *sigmoide*). El resultado es una probabilidad.
 3. Los pesos se eligen para que las probabilidades predichas se ajusten lo
    mejor posible a los desenlaces observados (*máxima verosimilitud*).
 
-**Odds ratio (OR)** = `exp(coeficiente)`. Un OR de 2 para "hombre" significa
-que los hombres tienen el doble de *odds* de EAC que las mujeres,
-**manteniendo constantes las demás variables**.
+## La misma idea en ecuaciones
+
+**Paso 1: la puntuación** (una suma ponderada de los predictores). $\beta_0$
+es el intercepto, y $\beta_1, \beta_2, \dots$ son los coeficientes que el
+modelo aprende de los datos:
+
+$$
+\text{puntuación} = \beta_0 + \beta_1 \times \text{edad} + \beta_2 \times \text{hombre} + \dots + \beta_k \times x_k
+$$
+
+**Paso 2: de la puntuación a la probabilidad.** La función logística
+convierte cualquier puntuación en una probabilidad $p$ entre 0 y 1:
+
+$$
+p = P(\text{EAC} = \text{sí}) = \frac{1}{1 + e^{-\text{puntuación}}}
+$$
+
+**El mismo modelo escrito al revés.** La puntuación es el *logaritmo de las
+odds* (log-odds) del desenlace. Por eso cada coeficiente es "el cambio en el
+log-odds por cada unidad del predictor":
+
+$$
+\log\left(\frac{p}{1 - p}\right) = \beta_0 + \beta_1 \times \text{edad} + \beta_2 \times \text{hombre} + \dots
+$$
+
+**Odds ratio (OR).** Al exponenciar un coeficiente se obtiene su odds ratio:
+
+$$
+\text{OR}_j = e^{\beta_j}
+$$
+
+Un OR de 2 para "hombre" significa que los hombres tienen el doble de *odds*
+de EAC que las mujeres, **manteniendo constantes las demás variables**.
+
+Así es la curva en forma de S del Paso 2. Una puntuación de 0 da una
+probabilidad de 0,5; las puntuaciones positivas grandes se acercan a 1 y las
+negativas grandes se acercan a 0:
+
+```{r sigmoid-curve, fig.height=3.5, fig.width=6}
+# curve() dibuja una función matemática. x es la puntuación; la fórmula es la función logística.
+curve(1 / (1 + exp(-x)), from = -6, to = 6,
+      xlab = "Puntuación (log-odds)", ylab = "Probabilidad de EAC",
+      lwd = 2, col = "steelblue")
+abline(h = 0.5, lty = 2, col = "grey50")   # línea discontinua en la probabilidad 0,5
+abline(v = 0,   lty = 2, col = "grey50")   # línea discontinua en la puntuación 0
+```
 
 ## Dos preguntas distintas: *explicar* frente a *predecir*
 
@@ -95,6 +138,14 @@ glm_fit <- glm(
 nobs(glm_fit)   # número de pacientes realmente usados
 ```
 
+Estos son los valores $\beta$ ajustados: los números que completan la
+ecuación de la sección 1.3. Un $\beta$ positivo aumenta la puntuación (y la
+probabilidad de EAC); un $\beta$ negativo la disminuye.
+
+```{r glm-coefficients}
+round(coef(glm_fit), 3)   # coef() extrae los coeficientes; round() deja 3 decimales
+```
+
 ## Tabla de odds ratios (lista para publicar)
 
 ```{r glm-table}
@@ -113,8 +164,11 @@ las mujeres **tras ajustar por todas las demás variables del modelo**.
 > **Precaución:** son *asociaciones*, no causas. Además, con 297 pacientes,
 > 139 eventos y 17 coeficientes, el modelo está cerca del límite de lo que
 > los datos permiten. Una regla práctica habitual pide al menos 10–20 eventos
-> por coeficiente. Para métodos adecuados de tamaño muestral, consulta Riley
-> et al., *BMJ* 2020.
+> por coeficiente, pero es una regla tosca. Para métodos adecuados de tamaño
+> muestral, consulta Riley RD, Ensor J, Snell KIE, et al. Calculating the
+> sample size required for developing a clinical prediction model. *BMJ*.
+> 2020;368:m441. <https://doi.org/10.1136/bmj.m441>. El paquete de R
+> `pmsampsize` implementa su método.
 
 # Parte B: la regresión logística como modelo *predictivo* (tidymodels)
 
@@ -430,6 +484,55 @@ bind_rows(
    la Parte C. ¿Se conservan más variables?
 2. Prueba un umbral de 0,7 en el bloque del umbral. ¿Qué pasa con la
    sensibilidad y la especificidad?
+
+# Referencias y lecturas recomendadas
+
+**Los métodos de esta lección**
+
+* Riley RD, Ensor J, Snell KIE, et al. Calculating the sample size required
+  for developing a clinical prediction model. *BMJ*. 2020;368:m441.
+  <https://doi.org/10.1136/bmj.m441>
+* Steyerberg EW, Vergouwe Y. Towards better clinical prediction models: seven
+  steps for development and an ABCD for validation. *Eur Heart J*.
+  2014;35(29):1925–31. <https://doi.org/10.1093/eurheartj/ehu207>. Trata la
+  codificación de predictores, los valores faltantes y la validación interna.
+* Kapoor S, Narayanan A. Leakage and the reproducibility crisis in
+  machine-learning-based science. *Patterns*. 2023;4(9):100804.
+  <https://doi.org/10.1016/j.patter.2023.100804>. Explica por qué el
+  preprocesamiento debe aprenderse solo con los datos de entrenamiento, que
+  es justo lo que hace la receta.
+* Hastie T, Tibshirani R, Friedman J. *The Elements of Statistical Learning*,
+  2.ª ed. Springer; 2009. Sección 7.10.2, "The wrong and right way to do
+  cross-validation" (la forma incorrecta y la correcta de hacer validación
+  cruzada). PDF gratuito: <https://hastie.su.domains/ElemStatLearn/>
+* Christodoulou E, Ma J, Collins GS, et al. A systematic review shows no
+  performance benefit of machine learning over logistic regression for
+  clinical prediction models. *J Clin Epidemiol*. 2019;110:12–22.
+  <https://doi.org/10.1016/j.jclinepi.2019.02.004>
+* Collins GS, Moons KGM, Dhiman P, et al. TRIPOD+AI statement. *BMJ*.
+  2024;385:e078378. <https://doi.org/10.1136/bmj-2023-078378>
+
+**Estudios clínicos publicados que usaron el mismo flujo de tidymodels**
+
+Según sus resúmenes, estos estudios construyeron sus modelos con tidymodels:
+división de los datos, remuestreo, preprocesamiento y ajuste de
+hiperparámetros, como en este curso. Lee sus secciones de métodos para ver
+cómo reportaron cada paso.
+
+* Lu C, He Y, Chen CR, et al. Development and validation of machine learning
+  models for distant metastasis of primary hepatic carcinoma: a
+  population-based study. *Discov Oncol*. 2025;16:1120.
+  <https://doi.org/10.1007/s12672-025-02894-5>. Ocho modelos en tidymodels,
+  con ROC/AUC, calibración, análisis de curvas de decisión y SHAP.
+* Lehan E, Briand P, O'Brien E, et al. Synergistic patient factors are
+  driving recent increased pediatric urgent care demand. *PLOS Digit
+  Health*. 2024;3(8):e0000572. <https://doi.org/10.1371/journal.pdig.0000572>.
+  tidymodels con validación cruzada de 5 particiones y predictores
+  estandarizados.
+* Estrella T, Capdevila L, Alfonso C, Losilla JM. Machine learning for the
+  analysis of healthy lifestyle data: scoping review and guidelines. *JMIR
+  Hum Factors*. 2026;13:e78648. <https://doi.org/10.2196/78648>. Ofrece guías
+  de reporte y recomienda tidymodels para flujos de trabajo replicables.
 
 # Siguiente
 

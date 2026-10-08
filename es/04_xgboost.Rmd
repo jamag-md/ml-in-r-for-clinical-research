@@ -30,6 +30,8 @@ un borrador. El segundo corrige solo lo que sigue mal. El tercero corrige lo
 que aún queda mal, y así sucesivamente. Cada corrección es pequeña, pero
 juntas producen un ensayo muy bueno.
 
+![Random forest frente a gradient boosting. Izquierda: árboles profundos construidos en paralelo, cada uno con una muestra al azar, y después promediados. Derecha: árboles pequeños construidos uno tras otro; las barras grises muestran el error que queda, que se reduce con cada árbol nuevo.](images/rf_vs_boosting_es.png){width=100%}
+
 Boosting **"por gradiente"** (*gradient boosting*) significa que cada árbol
 se ajusta al *gradiente* de la función de pérdida: dicho de forma sencilla,
 a la dirección en la que las predicciones actuales están más equivocadas.
