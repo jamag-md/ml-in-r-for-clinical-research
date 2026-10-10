@@ -29,16 +29,14 @@ ingeniería:
 | Valores faltantes | Los maneja directamente | Los maneja directamente |
 | Ajuste principal de complejidad | `tree_depth` | `num_leaves` (máximo de hojas por árbol) |
 
-```
-Por niveles (XGBoost)           Por hojas (LightGBM)
-        o                              o
-      /   \                          /   \
-     o     o                        o     o
-    / \   / \                            / \
-   o   o o   o                          o   o
-                                           / \
-                                          o   o
-```
+![Crecimiento por niveles frente a crecimiento por hojas. Los dos árboles hicieron 3 divisiones y tienen 4 hojas. XGBoost (izquierda) completa un nivel entero antes de bajar, así que su árbol se mantiene equilibrado. LightGBM (derecha) siempre divide la hoja donde más puede reducir el error, así que su árbol puede crecer mucho por un lado.](images/level_vs_leaf_wise_es.png){width=100%}
+
+Los números indican el **orden** en que se hicieron las divisiones. Los dos
+algoritmos hicieron el mismo número de divisiones (3) y terminaron con el
+mismo número de hojas (4). Pero LightGBM usó su tercera división para bajar
+**más profundo** en la rama donde más ganaba, en lugar de completar el nivel.
+Por eso el ajuste principal de complejidad de LightGBM es `num_leaves`
+(cuántas hojas puede tener un árbol) y no `tree_depth`.
 
 **¿Cuándo destaca LightGBM?** Con conjuntos de datos grandes (decenas de
 miles de filas o más) y muchas variables: registros, extracciones de

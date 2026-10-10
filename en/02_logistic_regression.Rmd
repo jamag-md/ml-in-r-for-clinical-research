@@ -133,13 +133,71 @@ glm_fit <- glm(
 nobs(glm_fit)   # number of patients actually used
 ```
 
-These are the fitted $\beta$ values: the numbers that fill in the equation
-from section 1.3. A positive $\beta$ raises the score (and the probability of
-CAD); a negative $\beta$ lowers it.
+## The equation the model learned
 
-```{r glm-coefficients}
-round(coef(glm_fit), 3)   # coef() extracts the coefficients; round() keeps 3 decimals
+Training the model means finding the $\beta$ values of the equation in
+section 1.3. Here they are, written out as the full equation:
+
+```{r glm-equation}
+b <- round(coef(glm_fit), 3)            # the fitted β values, rounded to 3 decimals
+
+equation_terms <- paste0(               # build one "± β × variable" piece per predictor
+  ifelse(b[-1] < 0, "- ", "+ "),        # b[-1] means "all β except the first (the intercept)"
+  abs(b[-1]), " × ", names(b)[-1]       # size of β, then the variable it multiplies
+)
+
+cat("score =", b[1], equation_terms, fill = 60)   # print it; fill = 60 wraps long lines
+cat("probability of CAD = 1 / (1 + exp(-score))\n")
 ```
+
+**How to read the variable names.** Numeric predictors appear with their own
+name and are used in their **original units**: `age` in years, `max_hr` in
+beats per minute, and so on. Each category gets its own **0/1 term**. For
+example, `sexMale` is 1 for men and 0 for women, and
+`chest_painAsymptomatic` is 1 only for patients with asymptomatic chest pain.
+The first category of each variable (female, typical angina, normal ECG...)
+has no term: it is the **reference**, and its effect is part of the intercept.
+
+A positive $\beta$ pushes the score (and the probability of CAD) up; a
+negative $\beta$ pulls it down. For example, each extra beat per minute of
+maximum heart rate changes the score by `r b["max_hr"]`.
+
+### Worked example: one patient, by hand
+
+Let's apply the equation to the first patient in the data and check that we
+get the same answer as R.
+
+```{r glm-worked-example}
+x <- model.matrix(glm_fit)[1, ]   # patient 1 as the model sees it: intercept = 1, categories as 0/1
+
+worked <- tibble(
+  term          = names(coef(glm_fit)),   # each piece of the equation
+  beta          = coef(glm_fit),          # its fitted β
+  patient_value = x,                      # this patient's value for that term
+  contribution  = beta * patient_value    # β × value: how much this term adds to the score
+)
+
+worked |> mutate(across(where(is.numeric), ~ round(.x, 3)))   # show the table, rounded
+
+score       <- sum(worked$contribution)   # step 1: add up all the pieces
+probability <- 1 / (1 + exp(-score))      # step 2: the logistic function turns it into a probability
+
+tibble(
+  score               = round(score, 3),
+  probability_by_hand = round(probability, 3),
+  probability_from_R  = round(unname(predict(glm_fit, type = "response")[1]), 3),  # R's own answer
+  actually_had_CAD    = heart_glm_data$disease_01[1]                               # 1 = yes, 0 = no
+)
+```
+
+The two probabilities match: **R does nothing more mysterious than this
+sum and the S-curve.** For this patient the score is `r round(score, 2)`,
+which gives a predicted probability of CAD of `r round(probability, 2)`.
+
+This is also why logistic regression is called **transparent**: the whole
+model fits in one equation that can be printed in a paper or turned into a
+bedside risk score. The tree-based models in the next lessons have no such
+equation.
 
 ## Odds-ratio table (publication-ready)
 

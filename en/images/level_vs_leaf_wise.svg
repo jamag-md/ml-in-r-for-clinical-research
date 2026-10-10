@@ -1,0 +1,48 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="680" height="470" viewBox="0 0 680 470" font-family="Segoe UI, Helvetica, Arial, sans-serif">
+<title>Level-wise versus leaf-wise tree growth</title>
+<desc>Left: XGBoost grows trees level by level, giving a balanced tree with 4 leaves and depth 2. Right: LightGBM always splits the leaf that reduces the error most, giving an uneven tree with 4 leaves and depth 3. Numbers show the order of the splits.</desc>
+<rect x="0" y="0" width="680" height="470" rx="12" fill="#FFFFFF"/>
+<rect x="30" y="20" width="300" height="388" rx="12" fill="none" stroke="#B4B2A9" stroke-width="1" stroke-dasharray="4 4"/>
+<rect x="350" y="20" width="300" height="388" rx="12" fill="none" stroke="#B4B2A9" stroke-width="1" stroke-dasharray="4 4"/>
+<g text-anchor="middle" dominant-baseline="central">
+<text x="180" y="46" font-size="15" font-weight="600" fill="#2C2C2A">Level-wise (XGBoost)</text>
+<text x="180" y="66" font-size="12" fill="#5F5E5A">Splits every node on a level</text>
+<text x="180" y="84" font-size="12" fill="#5F5E5A">before going one level deeper</text>
+<text x="500" y="46" font-size="15" font-weight="600" fill="#2C2C2A">Leaf-wise (LightGBM)</text>
+<text x="500" y="66" font-size="12" fill="#5F5E5A">Always splits the one leaf</text>
+<text x="500" y="84" font-size="12" fill="#5F5E5A">that reduces the error most</text>
+</g>
+<g stroke="#7F77DD" stroke-width="1.5" fill="none">
+<path d="M180 130L120 190M180 130L240 190M120 190L90 250M120 190L150 250M240 190L210 250M240 190L270 250"/>
+</g>
+<g fill="#7F77DD">
+<circle cx="180" cy="130" r="13"/><circle cx="120" cy="190" r="13"/><circle cx="240" cy="190" r="13"/>
+</g>
+<g fill="#FFFFFF" stroke="#7F77DD" stroke-width="1.75">
+<circle cx="90" cy="250" r="9"/><circle cx="150" cy="250" r="9"/><circle cx="210" cy="250" r="9"/><circle cx="270" cy="250" r="9"/>
+</g>
+<g stroke="#D85A30" stroke-width="1.5" fill="none">
+<path d="M500 130L445 190M500 130L555 190M445 190L405 250M445 190L485 250M485 250L455 310M485 250L515 310"/>
+</g>
+<g fill="#D85A30">
+<circle cx="500" cy="130" r="13"/><circle cx="445" cy="190" r="13"/><circle cx="485" cy="250" r="13"/>
+</g>
+<g fill="#FFFFFF" stroke="#D85A30" stroke-width="1.75">
+<circle cx="555" cy="190" r="9"/><circle cx="405" cy="250" r="9"/><circle cx="455" cy="310" r="9"/><circle cx="515" cy="310" r="9"/>
+</g>
+<g text-anchor="middle" dominant-baseline="central" font-size="12" font-weight="700" fill="#FFFFFF">
+<text x="180" y="130">1</text><text x="120" y="190">2</text><text x="240" y="190">3</text>
+<text x="500" y="130">1</text><text x="445" y="190">2</text><text x="485" y="250">3</text>
+</g>
+<rect x="60" y="338" width="240" height="56" rx="8" fill="#EEEDFE" stroke="#534AB7" stroke-width="0.75"/>
+<text x="180" y="357" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#3C3489">Balanced tree</text>
+<text x="180" y="377" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#534AB7">4 leaves, depth 2</text>
+<rect x="380" y="338" width="240" height="56" rx="8" fill="#FAECE7" stroke="#993C1D" stroke-width="0.75"/>
+<text x="500" y="357" text-anchor="middle" dominant-baseline="central" font-size="14" font-weight="600" fill="#712B13">Uneven, deeper tree</text>
+<text x="500" y="377" text-anchor="middle" dominant-baseline="central" font-size="12" fill="#993C1D">4 leaves, depth 3</text>
+<circle cx="120" cy="438" r="10" fill="#888780"/>
+<text x="120" y="438" text-anchor="middle" dominant-baseline="central" font-size="11" font-weight="700" fill="#FFFFFF">1</text>
+<text x="138" y="438" dominant-baseline="central" font-size="12" fill="#5F5E5A">Split (number = order made)</text>
+<circle cx="390" cy="438" r="8" fill="#FFFFFF" stroke="#888780" stroke-width="1.75"/>
+<text x="406" y="438" dominant-baseline="central" font-size="12" fill="#5F5E5A">Leaf (final group of patients)</text>
+</svg>

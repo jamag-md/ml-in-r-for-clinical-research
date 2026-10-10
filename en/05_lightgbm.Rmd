@@ -28,16 +28,14 @@ differences:
 | Missing values | Handled natively | Handled natively |
 | Main complexity setting | `tree_depth` | `num_leaves` (maximum leaves per tree) |
 
-```
-Level-wise (XGBoost)            Leaf-wise (LightGBM)
-        o                              o
-      /   \                          /   \
-     o     o                        o     o
-    / \   / \                            / \
-   o   o o   o                          o   o
-                                           / \
-                                          o   o
-```
+![Level-wise vs leaf-wise tree growth. Both trees made 3 splits and have 4 leaves. XGBoost (left) finishes a whole level before going deeper, so its tree stays balanced. LightGBM (right) always splits the leaf where it can reduce the error most, so its tree can grow deep on one side.](images/level_vs_leaf_wise.png){width=100%}
+
+Read the numbers as the **order** in which the splits were made. Both
+algorithms made the same number of splits (3) and ended with the same number
+of leaves (4). But LightGBM spent its third split going **deeper** on the
+branch where it gained most, instead of finishing the level. That is why
+LightGBM's main complexity setting is `num_leaves` (how many leaves a tree may
+have) rather than `tree_depth`.
 
 **When does LightGBM shine?** Large datasets (tens of thousands of rows or
 more) with many variables, such as registry data, EHR extracts or omics. On a

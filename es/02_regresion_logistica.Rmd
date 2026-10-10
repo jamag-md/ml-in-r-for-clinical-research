@@ -138,13 +138,74 @@ glm_fit <- glm(
 nobs(glm_fit)   # número de pacientes realmente usados
 ```
 
-Estos son los valores $\beta$ ajustados: los números que completan la
-ecuación de la sección 1.3. Un $\beta$ positivo aumenta la puntuación (y la
-probabilidad de EAC); un $\beta$ negativo la disminuye.
+## La ecuación que aprendió el modelo
 
-```{r glm-coefficients}
-round(coef(glm_fit), 3)   # coef() extrae los coeficientes; round() deja 3 decimales
+Entrenar el modelo significa encontrar los valores $\beta$ de la ecuación de
+la sección 1.3. Aquí están, escritos como la ecuación completa:
+
+```{r glm-equation}
+b <- round(coef(glm_fit), 3)            # los valores β ajustados, redondeados a 3 decimales
+
+equation_terms <- paste0(               # construye una pieza "± β × variable" por cada predictor
+  ifelse(b[-1] < 0, "- ", "+ "),        # b[-1] significa "todos los β menos el primero (el intercepto)"
+  abs(b[-1]), " × ", names(b)[-1]       # el tamaño de β y la variable a la que multiplica
+)
+
+cat("puntuación =", b[1], equation_terms, fill = 60)   # lo muestra; fill = 60 corta las líneas largas
+cat("probabilidad de EAC = 1 / (1 + exp(-puntuación))\n")
 ```
+
+**Cómo leer los nombres de las variables.** Los predictores numéricos
+aparecen con su propio nombre y se usan en sus **unidades originales**: `age`
+en años, `max_hr` en latidos por minuto, etc. Cada categoría tiene su propio
+**término 0/1**. Por ejemplo, `sexMale` vale 1 en los hombres y 0 en las
+mujeres, y `chest_painAsymptomatic` vale 1 solo en los pacientes con dolor
+torácico asintomático. La primera categoría de cada variable (mujer, angina
+típica, ECG normal...) no tiene término: es la **referencia**, y su efecto
+forma parte del intercepto.
+
+Un $\beta$ positivo sube la puntuación (y la probabilidad de EAC); un $\beta$
+negativo la baja. Por ejemplo, cada latido por minuto adicional de frecuencia
+cardíaca máxima cambia la puntuación en `r b["max_hr"]`.
+
+### Ejemplo resuelto: un paciente, a mano
+
+Apliquemos la ecuación al primer paciente de los datos y comprobemos que
+obtenemos la misma respuesta que R.
+
+```{r glm-worked-example}
+x <- model.matrix(glm_fit)[1, ]   # el paciente 1 tal como lo ve el modelo: intercepto = 1, categorías como 0/1
+
+worked <- tibble(
+  term          = names(coef(glm_fit)),   # cada pieza de la ecuación
+  beta          = coef(glm_fit),          # su β ajustado
+  patient_value = x,                      # el valor de este paciente para ese término
+  contribution  = beta * patient_value    # β × valor: cuánto suma este término a la puntuación
+)
+
+worked |> mutate(across(where(is.numeric), ~ round(.x, 3)))   # muestra la tabla, redondeada
+
+score       <- sum(worked$contribution)   # paso 1: sumar todas las piezas
+probability <- 1 / (1 + exp(-score))      # paso 2: la función logística lo convierte en probabilidad
+
+tibble(
+  score               = round(score, 3),
+  probability_by_hand = round(probability, 3),
+  probability_from_R  = round(unname(predict(glm_fit, type = "response")[1]), 3),  # la respuesta de R
+  actually_had_CAD    = heart_glm_data$disease_01[1]                               # 1 = sí, 0 = no
+)
+```
+
+Las dos probabilidades coinciden: **R no hace nada más misterioso que esta
+suma y la curva en S.** Para este paciente la puntuación es
+`r round(score, 2)`, lo que da una probabilidad predicha de EAC de
+`r round(probability, 2)`.
+
+Por eso se dice que la regresión logística es **transparente**: todo el
+modelo cabe en una ecuación que se puede imprimir en un artículo o convertir
+en una puntuación de riesgo para usar junto a la cama del paciente. Los
+modelos basados en árboles de las próximas lecciones no tienen una ecuación
+así.
 
 ## Tabla de odds ratios (lista para publicar)
 

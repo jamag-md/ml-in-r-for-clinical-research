@@ -120,48 +120,169 @@ xgb_params
 
 ## Space-filling grid
 
-With 4 hyperparameters, a regular grid of 5 values each would be
-5^4 = 625 combinations. That is too many. A **space-filling grid** spreads a
-smaller number of combinations (here 30) evenly across the whole search space.
+### The problem: too many combinations
+
+We want to try different **combinations** of the 4 hyperparameters and keep
+the best one. The obvious approach is a **regular grid**: pick 5 values for
+each hyperparameter and try every combination. With 4 hyperparameters that is
+5 × 5 × 5 × 5 = **625 combinations**, and each one is fitted 10 times (once
+per cross-validation fold): **6,250 models**. Far too slow.
+
+So we can only afford a small number of combinations, here **30**. The
+question is *which* 30.
+
+### An analogy: placing smoke detectors
+
+Imagine you have 30 smoke detectors for a large hall and you want any fire,
+anywhere, to be detected quickly.
+
+* **Regular grid:** neat rows and columns. Tidy, but each detector shares its
+  "row" and "column" with many others, so you only cover a few distinct
+  positions along each wall.
+* **Random:** throw them in from the door. Some land in clumps, and whole
+  corners stay empty.
+* **Space-filling:** place each detector as far as possible from the others.
+  Every part of the hall is covered, and no two detectors waste effort on the
+  same spot.
+
+A **space-filling grid** does the same for hyperparameters: it spreads the
+combinations evenly across the whole search space.
+
+### See it with two hyperparameters
+
+Here are 25 combinations of just two hyperparameters (learning rate and
+minimum node size), chosen in the three ways. The small tick marks along each
+axis (a *rug*) show every distinct value that was tried.
+
+```{r grid-demo, fig.height=3.8, fig.width=10}
+# A set of only two hyperparameters, with the same ranges we use for XGBoost
+two_params <- parameters(
+  learn_rate(range = c(-3, -0.5)),   # learning rate from 0.001 to 0.32 (log10 scale)
+  min_n(range = c(2, 30))            # minimum node size from 2 to 30 patients
+)
+
+set.seed(2024)   # random and space-filling designs involve randomness: fix it
+
+# Build 25 combinations in three different ways and stack them in one table
+demo_grids <- bind_rows(
+  "Regular grid (5 × 5)" = grid_regular(two_params, levels = 5),        # 5 values each, all combinations
+  "Random"               = grid_random(two_params, size = 25),          # 25 random points
+  "Space-filling"        = grid_space_filling(two_params, size = 25),   # 25 evenly spread points
+  .id = "method"                     # new column saying which method made each row
+) |>
+  mutate(method = factor(method, levels = c("Regular grid (5 × 5)", "Random", "Space-filling")))  # panel order
+
+ggplot(demo_grids, aes(x = learn_rate, y = min_n)) +
+  geom_point(size = 2.5, colour = "steelblue") +                # one dot = one combination to try
+  geom_rug(colour = "grey40", length = unit(0.04, "npc")) +     # tick marks: distinct values on each axis
+  scale_x_log10() +                                             # learning rate on a log scale
+  facet_wrap(~ method) +                                        # one panel per method
+  labs(x = "Learning rate (log scale)", y = "Minimum node size (min_n)") +
+  theme_minimal() +
+  theme(panel.border = element_rect(fill = NA, colour = "grey80"))
+```
+
+Now count how many **different** values of each hyperparameter were tried:
+
+```{r grid-demo-count}
+demo_grids |>
+  group_by(method) |>                              # separately for each method
+  summarise(
+    different_learn_rates = n_distinct(learn_rate),   # n_distinct() counts unique values
+    different_min_n       = n_distinct(min_n)
+  )
+```
+
+**Why this matters.** Often one hyperparameter barely affects performance.
+If, say, `min_n` turns out not to matter, the regular grid has effectively
+tested only **5** learning rates: its 25 fits were mostly repeats. The random
+design leaves gaps and clumps. The space-filling design tested **25 different
+values of each** hyperparameter with the same 25 fits, and covers the space
+evenly. With 4 hyperparameters the advantage is even larger.
+
+### The real grid: 30 combinations of 4 hyperparameters
+
+```{r xgb-grid}
+set.seed(2024)                         # makes the space-filling layout reproducible
+xgb_grid <- grid_space_filling(
+  xgb_params,                          # the 4 hyperparameters and their ranges (chunk above)
+  size = 30                            # how many combinations ("candidate models") to try
+)
+
+xgb_grid   # one row per candidate model, one column per hyperparameter (first 10 rows shown)
+```
+
+### Tuning: test every candidate with cross-validation
+
+Each of the 30 candidates is trained and evaluated on all 10 folds: 300 fits
+in total. This is the slow step (about a minute).
 
 ```{r xgb-tune}
-set.seed(2024)
-xgb_grid <- grid_space_filling(xgb_params, size = 30)
-
-head(xgb_grid)   # the first few combinations
-
 xgb_tune <- tune_grid(
-  xgb_wf,
-  resamples = heart_folds,
-  grid      = xgb_grid,
-  metrics   = heart_metrics
+  xgb_wf,                    # the workflow: recipe + XGBoost model with tune() placeholders
+  resamples = heart_folds,   # the same 10 cross-validation folds used in every lesson
+  grid      = xgb_grid,      # the 30 candidate combinations to try
+  metrics   = heart_metrics  # what to measure for each candidate on each fold
 )
 ```
 
 ```{r xgb-tune-plot, fig.height=6, fig.width=10}
-autoplot(xgb_tune, metric = "roc_auc")   # AUC against each hyperparameter
+autoplot(xgb_tune, metric = "roc_auc")   # one panel per hyperparameter; each dot = one candidate's mean AUC
 ```
 
+**How to read the plot:** each panel shows one hyperparameter on the x-axis.
+Each dot is one of the 30 candidates, placed at its value of that
+hyperparameter, with its average cross-validated AUC on the y-axis. Look for
+**patterns**: for example, whether AUC drops at very high learning rates.
+Because all 4 hyperparameters vary at once, expect scatter; no single panel
+tells the whole story.
+
 ```{r xgb-best}
-show_best(xgb_tune, metric = "roc_auc", n = 5)
-best_xgb <- select_best(xgb_tune, metric = "roc_auc")
-best_xgb
+show_best(xgb_tune, metric = "roc_auc", n = 5)         # the 5 candidates with the highest mean AUC
+best_xgb <- select_best(xgb_tune, metric = "roc_auc")  # keep only the single best combination
+best_xgb                                               # its 4 hyperparameter values (+ an ID, .config)
 ```
 
 # Final model and test-set evaluation
 
+Tuning used **only the training data** (through cross-validation) to choose
+the hyperparameters. Now three steps finish the job:
+
+1. **Finalize:** replace each `tune()` placeholder in the workflow with the
+   value chosen above.
+2. **Fit once:** train that final model on **all 227 training patients**.
+3. **Test once:** predict the **76 test patients**, who were never used for
+   anything until now, and measure performance.
+
+`last_fit()` does steps 2 and 3 in one call.
+
 ```{r xgb-final}
-xgb_final_wf <- finalize_workflow(xgb_wf, best_xgb)
+xgb_final_wf <- finalize_workflow(   # step 1: fill in the tune() placeholders
+  xgb_wf,                            #   the workflow that still contains tune()
+  best_xgb                           #   the best combination found by cross-validation
+)
 
-xgb_final <- last_fit(xgb_final_wf, split = heart_split, metrics = heart_metrics)
+xgb_final_wf   # check: the model section now shows real numbers instead of tune()
 
-collect_metrics(xgb_final)
+xgb_final <- last_fit(               # steps 2 and 3: fit on training data, predict the test data
+  xgb_final_wf,                      #   the finalized workflow
+  split   = heart_split,             #   the original 75/25 split: knows which patients are train/test
+  metrics = heart_metrics            #   the same five metrics as before
+)
+
+collect_metrics(xgb_final)           # performance on the 76 test patients (look at .estimate)
 ```
 
+**How to read the output:** each row is one metric. `.estimate` is the value
+on the test set. Compare it with the cross-validated value from `show_best()`
+above: a test AUC a bit lower than the CV AUC is normal (we picked the best of
+30 candidates, which is slightly optimistic, and 76 patients is a small test
+set). A **much** lower test AUC would suggest overfitting.
+
 ```{r xgb-roc, fig.height=4, fig.width=4}
-collect_predictions(xgb_final) |>
-  roc_curve(truth = disease, .pred_Yes) |>
-  autoplot()
+collect_predictions(xgb_final) |>          # one row per test patient: true status + predicted probability
+  roc_curve(truth = disease, .pred_Yes) |> # sensitivity and specificity at every possible threshold
+  autoplot()                               # draw the ROC curve
 ```
 
 # Explaining the model

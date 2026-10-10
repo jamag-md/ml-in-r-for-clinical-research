@@ -124,49 +124,175 @@ xgb_params
 
 ## Cuadrícula que cubre el espacio (*space-filling*)
 
-Con 4 hiperparámetros, una cuadrícula regular de 5 valores cada uno serían
-5^4 = 625 combinaciones. Son demasiadas. Una **cuadrícula space-filling**
-reparte un número menor de combinaciones (aquí 30) de forma uniforme por todo
-el espacio de búsqueda.
+### El problema: demasiadas combinaciones
+
+Queremos probar distintas **combinaciones** de los 4 hiperparámetros y
+quedarnos con la mejor. La forma obvia es una **cuadrícula regular**: elegir 5
+valores de cada hiperparámetro y probar todas las combinaciones. Con 4
+hiperparámetros son 5 × 5 × 5 × 5 = **625 combinaciones**, y cada una se
+ajusta 10 veces (una por cada partición de la validación cruzada): **6250
+modelos**. Demasiado lento.
+
+Así que solo podemos permitirnos unas pocas combinaciones, aquí **30**. La
+pregunta es *cuáles* 30.
+
+### Una analogía: colocar detectores de humo
+
+Imagina que tienes 30 detectores de humo para un salón grande y quieres que
+cualquier incendio, en cualquier lugar, se detecte rápido.
+
+* **Cuadrícula regular:** filas y columnas ordenadas. Es ordenado, pero
+  cada detector comparte su "fila" y su "columna" con muchos otros, así que
+  solo cubres unas pocas posiciones distintas a lo largo de cada pared.
+* **Al azar:** los lanzas desde la puerta. Algunos caen amontonados y quedan
+  rincones enteros vacíos.
+* **Space-filling:** colocas cada detector lo más lejos posible de los demás.
+  Se cubre todo el salón y ningún par de detectores desperdicia esfuerzo en el
+  mismo sitio.
+
+Una **cuadrícula space-filling** hace lo mismo con los hiperparámetros:
+reparte las combinaciones de forma uniforme por todo el espacio de búsqueda.
+
+### Verlo con dos hiperparámetros
+
+Aquí hay 25 combinaciones de solo dos hiperparámetros (tasa de aprendizaje y
+tamaño mínimo del nodo), elegidas de las tres maneras. Las pequeñas marcas a
+lo largo de cada eje (una *alfombra* o *rug*) muestran cada valor distinto que
+se probó.
+
+```{r grid-demo, fig.height=3.8, fig.width=10}
+# Un conjunto de solo dos hiperparámetros, con los mismos rangos que usamos para XGBoost
+two_params <- parameters(
+  learn_rate(range = c(-3, -0.5)),   # tasa de aprendizaje de 0,001 a 0,32 (escala log10)
+  min_n(range = c(2, 30))            # tamaño mínimo del nodo de 2 a 30 pacientes
+)
+
+set.seed(2024)   # los diseños al azar y space-filling usan azar: lo fijamos
+
+# Construye 25 combinaciones de tres maneras distintas y las apila en una tabla
+demo_grids <- bind_rows(
+  "Cuadrícula regular (5 × 5)" = grid_regular(two_params, levels = 5),        # 5 valores de cada uno, todas las combinaciones
+  "Al azar"                    = grid_random(two_params, size = 25),          # 25 puntos al azar
+  "Space-filling"              = grid_space_filling(two_params, size = 25),   # 25 puntos repartidos uniformemente
+  .id = "method"                     # columna nueva que indica qué método creó cada fila
+) |>
+  mutate(method = factor(method, levels = c("Cuadrícula regular (5 × 5)", "Al azar", "Space-filling")))  # orden de los paneles
+
+ggplot(demo_grids, aes(x = learn_rate, y = min_n)) +
+  geom_point(size = 2.5, colour = "steelblue") +                # un punto = una combinación a probar
+  geom_rug(colour = "grey40", length = unit(0.04, "npc")) +     # marcas: valores distintos en cada eje
+  scale_x_log10() +                                             # tasa de aprendizaje en escala logarítmica
+  facet_wrap(~ method) +                                        # un panel por método
+  labs(x = "Tasa de aprendizaje (escala logarítmica)", y = "Tamaño mínimo del nodo (min_n)") +
+  theme_minimal() +
+  theme(panel.border = element_rect(fill = NA, colour = "grey80"))
+```
+
+Ahora cuenta cuántos valores **distintos** de cada hiperparámetro se probaron:
+
+```{r grid-demo-count}
+demo_grids |>
+  group_by(method) |>                              # por separado para cada método
+  summarise(
+    different_learn_rates = n_distinct(learn_rate),   # n_distinct() cuenta los valores únicos
+    different_min_n       = n_distinct(min_n)
+  )
+```
+
+**Por qué importa.** A menudo un hiperparámetro apenas influye en el
+rendimiento. Si, por ejemplo, `min_n` resulta no importar, la cuadrícula
+regular en la práctica solo probó **5** tasas de aprendizaje: sus 25 ajustes
+fueron sobre todo repeticiones. El diseño al azar deja huecos y grupos. El
+diseño space-filling probó **25 valores distintos de cada** hiperparámetro con
+los mismos 25 ajustes, y cubre el espacio de forma uniforme. Con 4
+hiperparámetros la ventaja es todavía mayor.
+
+### La cuadrícula real: 30 combinaciones de 4 hiperparámetros
+
+```{r xgb-grid}
+set.seed(2024)                         # hace reproducible la disposición space-filling
+xgb_grid <- grid_space_filling(
+  xgb_params,                          # los 4 hiperparámetros y sus rangos (bloque anterior)
+  size = 30                            # cuántas combinaciones ("modelos candidatos") probar
+)
+
+xgb_grid   # una fila por modelo candidato, una columna por hiperparámetro (se muestran las 10 primeras filas)
+```
+
+### El ajuste: evaluar cada candidato con validación cruzada
+
+Cada uno de los 30 candidatos se entrena y se evalúa en las 10 particiones:
+300 ajustes en total. Es el paso lento (alrededor de un minuto).
 
 ```{r xgb-tune}
-set.seed(2024)
-xgb_grid <- grid_space_filling(xgb_params, size = 30)
-
-head(xgb_grid)   # las primeras combinaciones
-
 xgb_tune <- tune_grid(
-  xgb_wf,
-  resamples = heart_folds,
-  grid      = xgb_grid,
-  metrics   = heart_metrics
+  xgb_wf,                    # el flujo de trabajo: receta + modelo XGBoost con marcadores tune()
+  resamples = heart_folds,   # las mismas 10 particiones de validación cruzada de todas las lecciones
+  grid      = xgb_grid,      # las 30 combinaciones candidatas que se prueban
+  metrics   = heart_metrics  # qué medir para cada candidato en cada partición
 )
 ```
 
 ```{r xgb-tune-plot, fig.height=6, fig.width=10}
-autoplot(xgb_tune, metric = "roc_auc")   # AUC frente a cada hiperparámetro
+autoplot(xgb_tune, metric = "roc_auc")   # un panel por hiperparámetro; cada punto = AUC medio de un candidato
 ```
 
+**Cómo leer el gráfico:** cada panel muestra un hiperparámetro en el eje x.
+Cada punto es uno de los 30 candidatos, situado en su valor de ese
+hiperparámetro, con su AUC medio de validación cruzada en el eje y. Busca
+**patrones**: por ejemplo, si el AUC cae con tasas de aprendizaje muy altas.
+Como los 4 hiperparámetros cambian a la vez, es normal que haya dispersión;
+ningún panel cuenta toda la historia por sí solo.
+
 ```{r xgb-best}
-show_best(xgb_tune, metric = "roc_auc", n = 5)
-best_xgb <- select_best(xgb_tune, metric = "roc_auc")
-best_xgb
+show_best(xgb_tune, metric = "roc_auc", n = 5)         # los 5 candidatos con el AUC medio más alto
+best_xgb <- select_best(xgb_tune, metric = "roc_auc")  # se queda solo con la mejor combinación
+best_xgb                                               # sus 4 valores de hiperparámetros (+ un identificador, .config)
 ```
 
 # Modelo final y evaluación con el conjunto de prueba
 
+El ajuste usó **solo los datos de entrenamiento** (mediante validación
+cruzada) para elegir los hiperparámetros. Ahora tres pasos terminan el
+trabajo:
+
+1. **Finalizar:** reemplazar cada marcador `tune()` del flujo de trabajo por
+   el valor elegido arriba.
+2. **Ajustar una vez:** entrenar ese modelo final con **los 227 pacientes de
+   entrenamiento**.
+3. **Evaluar una vez:** predecir los **76 pacientes de prueba**, que no se
+   habían usado para nada hasta ahora, y medir el rendimiento.
+
+`last_fit()` hace los pasos 2 y 3 en una sola llamada.
+
 ```{r xgb-final}
-xgb_final_wf <- finalize_workflow(xgb_wf, best_xgb)
+xgb_final_wf <- finalize_workflow(   # paso 1: completar los marcadores tune()
+  xgb_wf,                            #   el flujo de trabajo que aún contiene tune()
+  best_xgb                           #   la mejor combinación encontrada por validación cruzada
+)
 
-xgb_final <- last_fit(xgb_final_wf, split = heart_split, metrics = heart_metrics)
+xgb_final_wf   # comprobación: la sección del modelo ahora muestra números reales en lugar de tune()
 
-collect_metrics(xgb_final)
+xgb_final <- last_fit(               # pasos 2 y 3: ajustar con entrenamiento, predecir la prueba
+  xgb_final_wf,                      #   el flujo de trabajo finalizado
+  split   = heart_split,             #   la división 75/25 original: sabe qué pacientes son de entrenamiento/prueba
+  metrics = heart_metrics            #   las mismas cinco métricas de antes
+)
+
+collect_metrics(xgb_final)           # rendimiento en los 76 pacientes de prueba (mira .estimate)
 ```
 
+**Cómo leer el resultado:** cada fila es una métrica. `.estimate` es el valor
+en el conjunto de prueba. Compáralo con el valor de validación cruzada de
+`show_best()` de arriba: que el AUC de prueba sea algo menor que el de
+validación cruzada es normal (elegimos el mejor de 30 candidatos, lo que es
+un poco optimista, y 76 pacientes son un conjunto de prueba pequeño). Un AUC
+de prueba **mucho** menor sugeriría sobreajuste.
+
 ```{r xgb-roc, fig.height=4, fig.width=4}
-collect_predictions(xgb_final) |>
-  roc_curve(truth = disease, .pred_Yes) |>
-  autoplot()
+collect_predictions(xgb_final) |>          # una fila por paciente de prueba: estado real + probabilidad predicha
+  roc_curve(truth = disease, .pred_Yes) |> # sensibilidad y especificidad para todos los umbrales posibles
+  autoplot()                               # dibuja la curva ROC
 ```
 
 # Explicar el modelo
